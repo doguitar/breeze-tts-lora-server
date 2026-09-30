@@ -1,0 +1,92 @@
+name: Build CUDA image
+
+# Builds the CUDA image from .devops/breeze_lora_cuda.Dockerfile.
+#
+# The CUDA image is compiled for a configurable set of SM architectures via the
+# CUDA_DOCKER_ARCH argument (the Dockerfile's CUDA_DOCKER_ARCH build arg). The
+# default covers Ampere, Ada and Hopper so the published image runs on common
+# cloud GPUs. Override it for a deployment with a narrower GPU fleet.
+#
+# Unit tests are covered by the CPU workflow, which runs the same test binaries
+# on a CPU-only runner. The CUDA image links the CUDA backend, so running those
+# binaries needs a GPU host.
+#
+# Push tags:
+#   ghcr.io/<owner>/<repo>:cuda
+#   ghcr.io/<owner>/<repo>:cuda-<short-sha>
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "app/breeze_lora_server/**"
+      - "src/models/breeze_tts/**"
+      - "include/engine/models/breeze_tts/**"
+      - "tests/unittests/test_breeze_lora_*.cpp"
+      - "CMakeLists.txt"
+      - ".devops/breeze_lora_cuda.Dockerfile"
+      - ".dockerignore"
+      - ".github/workflows/cuda-image.yml"
+  pull_request:
+    paths:
+      - "app/breeze_lora_server/**"
+      - "src/models/breeze_tts/**"
+      - "include/engine/models/breeze_tts/**"
+      - "tests/unittests/test_breeze_lora_*.cpp"
+      - "CMakeLists.txt"
+      - ".devops/breeze_lora_cuda.Dockerfile"
+      - ".dockerignore"
+      - ".github/workflows/cuda-image.yml"
+  workflow_dispatch:
+    inputs:
+      cuda_arches:
+        description: "CMAKE_CUDA_ARCHITECTURES value (e.g. '80;86;89;90')"
+        type: string
+        default: "80;86;89;90"
+
+concurrency:
+  group: cuda-image-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  cuda:
+    name: CUDA image
+    runs-on: ubuntu-24.04
+    env:
+      CUDA_ARCHES: ${{ inputs.cuda_arches || '80;86;89;90' }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Compute image tags
+        id: meta
+        run: echo "short_sha=$(git rev-parse --short=12 HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Build CUDA image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: .devops/breeze_lora_cuda.Dockerfile
+          build-args: |
+            CUDA_DOCKER_ARCH=${{ env.CUDA_ARCHES }}
+          tags: |
+            ghcr.io/${{ github.repository }}:cuda
+            ghcr.io/${{ github.repository }}:cuda-${{ steps.meta.outputs.short_sha }}
+          cache-from: type=gha,scope=cuda
+          cache-to: type=gha,mode=max,scope=cuda
+          push: ${{ github.event_name != 'pull_request' }}

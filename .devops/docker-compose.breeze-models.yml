@@ -1,0 +1,27 @@
+# Breeze LoRA server (CPU image) serving a host model directory read-only.
+#
+#   BREEZE_MODELS_DIR=/path/to/breeze-models \
+#     docker compose -f .devops/docker-compose.breeze-models.yml up -d
+#
+# BREEZE_MODELS_DIR must contain `server.json` and everything it references
+# (adapter directories, reference WAVs, and the Breeze GGUF package). It is
+# mounted at /models, and the config is loaded from /models/server.json so that
+# relative `lora` / `voice_ref` paths resolve inside the same mount.
+#
+# Defaults to ../models relative to this file. See
+# app/breeze_lora_server/README.md for the config schema.
+#
+# Docker Desktop for Windows does not follow NTFS junctions into the Linux VM.
+# If Breeze-TTS-2-GGUF is a junction on the host, bind the real directory as a
+# second entry under `volumes:` so the container can see it.
+
+services:
+  breeze-lora-server:
+    image: local/breeze-lora-server:cpu
+    container_name: breeze-models
+    restart: unless-stopped
+    command: ["--config", "/models/server.json"]
+    ports:
+      - "8080:8080"
+    volumes:
+      - ${BREEZE_MODELS_DIR:-../models}:/models:ro

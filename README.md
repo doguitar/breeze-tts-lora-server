@@ -1,0 +1,347 @@
+# breeze-lora-server
+
+OpenAI-compatible HTTP server for **Breeze TTS 2** with **LoRA adapter hot-swap**.
+
+One resident Breeze GGUF base model serves many named voices. Each Instavar-format
+adapter directory is exposed as an OpenAI `model` id, and the server switches
+adapter weights when the requested id changes. Training and adapter export stay in
+Python; this repository only **serves** adapters.
+
+This project is a focused fork of [`0xShug0/audio.cpp`](https://github.com/0xShug0/audio.cpp)
+that keeps the upstream GGUF runtime, CUDA/CPU backends and HTTP stack, and adds a
+dedicated Breeze server executable with a LoRA registry.
+
+| | |
+|---|---|
+| Upstream revision | [`ed96b7307c8daba2ebcf7912af928825f6b14cb9`](https://github.com/0xShug0/audio.cpp/commit/ed96b7307c8daba2ebcf7912af928825f6b14cb9) (see `UPSTREAM_PIN.txt`) |
+| Server source | [`app/breeze_lora_server/`](app/breeze_lora_server) |
+| LoRA runtime | [`src/models/breeze_tts/lora.cpp`](src/models/breeze_tts/lora.cpp), [`include/engine/models/breeze_tts/lora.h`](include/engine/models/breeze_tts/lora.h) |
+| License | Apache-2.0 for the code; the Breeze TTS 2 **weights** have their own license (see below) |
+
+---
+
+## Capability status
+
+Read this before deploying.
+
+| Capability | Status |
+|---|---|
+| `GET /health` | Implemented |
+| `GET /v1/models` | Implemented — lists `breeze-base` plus every configured adapter id |
+| `POST /v1/audio/speech` | Implemented — complete `audio/wav` responses only |
+| Bounded FIFO queue with `503 queue_full` | Implemented — one inference worker, `max_queue_depth` bound |
+| Adapter selection by OpenAI `model` id | Implemented — re-selecting the active id is a no-op |
+| Resident base with a **non-destructive side-adapter** path | **Not implemented — see the deviation note below** |
+
+### Deviation from the original design
+
+The design this fork was built against called for an *immutable resident base* plus a
+per-forward low-rank side path, so that switching adapters would never rewrite base
+weights (`y = W·x + scale·B·(A·x)` evaluated as extra graph nodes).
+
+**What ships today is merge-and-upload hot-swap, not that.** On each adapter switch,
+`BreezeLoraManager::activate_adapter()` merges `W + scale·B·A` on the host and
+re-uploads the full dense weight tensor into the resident ggml tensor
+(`src/models/breeze_tts/lora.cpp`). `activate_base()` likewise re-uploads the base
+rows. Consequences:
+
+- Switching adapters **does** rewrite the live base weight buffers; the base is not
+  immutable across a switch.
+- Switch cost scales with total adapter-covered weight bytes, not with rank.
+- Correctness still holds because activation and inference share a single worker
+  thread, so no request observes partially updated buffers — but the memory/immutability
+  guarantee of the original design is **not** met.
+
+The `breeze_lora_linear_forward()` helper (the true side-path math, `W·x + scale·B·(A·x)`)
+exists and is unit-tested, but it is **only used by tests**; it is not wired into the
+ggml graph. See [Moving to a true side-adapter path](#moving-to-a-true-side-adapter-path).
+
+---
+
+## Quick start (Docker, CPU)
+
+The fastest way to see it work. CPU generation is slow; use CUDA for real traffic.
+
+```bash
+docker build -f .devops/breeze_lora_cpu.Dockerfile -t breeze-lora-server:cpu .
+```
+
+Create a model directory containing `server.json` plus everything it references:
+
+```
+my-models/
+├── server.json
+├── Breeze-TTS-2-GGUF/          # Breeze TTS 2 GGUF package
+└── loras/
+    └── my-voice/
+        ├── adapter_config.json
+        ├── adapter.safetensors
+        ├── reference.wav
+        └── reference.txt
+```
+
+Run it:
+
+```bash
+docker run --rm -p 8080:8080 \
+  -v /path/to/my-models:/models:ro \
+  breeze-lora-server:cpu
+```
+
+The image entrypoint already passes `--config /app/server.json`; mount your config to
+that path, or override the entrypoint. With the bundled compose file:
+
+```bash
+BREEZE_MODELS_DIR=/path/to/my-models \
+  docker compose -f .devops/docker-compose.breeze-models.yml up -d
+```
+
+### CUDA
+
+```bash
+docker build -f .devops/breeze_lora_cuda.Dockerfile \
+  --build-arg CUDA_DOCKER_ARCH="80;86;89;90" \
+  -t breeze-lora-server:cuda .
+
+docker run --rm --gpus all -p 8080:8080 \
+  -v /path/to/my-models:/models:ro \
+  -v /path/to/server.json:/app/server.json:ro \
+  breeze-lora-server:cuda
+```
+
+---
+
+## Configuration
+
+`server.json` is resolved relative to its own directory, so relative paths inside it
+stay inside the mounted tree.
+
+```json
+{
+  "host": "0.0.0.0",
+  "port": 8080,
+  "backend": "cuda",
+  "device": 0,
+  "threads": 1,
+  "max_queue_depth": 8,
+  "base_model": "Breeze-TTS-2-GGUF",
+  "base_revision": "799624c0b4a1daa8db6d28bbd9850043c0270734",
+  "models": [
+    {
+      "id": "breeze-base",
+      "lora": null,
+      "default_instruction": "Speak clearly and naturally."
+    },
+    {
+      "id": "my-voice",
+      "lora": "loras/my-voice",
+      "default_instruction": "Speak clearly and naturally.",
+      "voice_ref": "loras/my-voice/reference.wav",
+      "reference_text_file": "loras/my-voice/reference.txt"
+    }
+  ]
+}
+```
+
+| Field | Meaning |
+|---|---|
+| `host`, `port` | Listen address. Port must be 1–65535. |
+| `backend` | `cuda` or `cpu`. |
+| `device` | Backend device index. |
+| `threads` | Worker threads for the backend. Must be positive. |
+| `max_queue_depth` | Max waiting requests before `503 queue_full`. Must be positive. |
+| `base_model` | Breeze TTS 2 GGUF package directory or file. Must exist. |
+| `base_revision` | Optional; checked against each adapter manifest's pinned base revision. |
+| `models[].id` | OpenAI model id. Must be unique. |
+| `models[].lora` | Adapter directory, or `null` for the unadapted base. |
+| `models[].default_instruction` | Instruction used when a request omits `instruction`. |
+| `models[].voice_ref` | Optional reference WAV that puts the id into clone mode. |
+| `models[].reference_text` / `reference_text_file` | Transcript of `voice_ref`. Exactly one. |
+
+Rules enforced at startup (the process refuses to start rather than skipping a bad entry):
+
+- `models` must include `breeze-base` with `"lora": null`.
+- Model ids must be unique; adapter directories must exist.
+- `voice_ref` requires exactly one of `reference_text` / `reference_text_file`.
+- Each adapter must validate: schema, variant, rank, alpha, checksums, base identity,
+  and a complete A/B tensor pair for every target module.
+
+An invalid deployment is a startup failure by design.
+
+### Adapter format
+
+Each adapter directory contains `adapter_config.json` and `adapter.safetensors`.
+The server accepts exactly one layout in v1:
+
+| Field | Required value |
+|---|---|
+| `schema_version` | `1` |
+| `artifact_type` | `breeze_lora_adapter` |
+| `lora.variant` | `backbone_depth_projection` |
+| `lora.rank` | `8` |
+| `lora.alpha` | positive finite (scale = `alpha / rank`) |
+
+Adapted modules: backbone and depth-decoder attention/MLP projections
+(`.self_attn.{q,k,v,o}_proj`, `.mlp.{gate,up,down}_proj`), plus `text_encoder_proj`,
+`depth_decoder.model.inputs_embeds_projector`, and `lm_head`. Tensors are named
+`{module}.lora_A` / `{module}.lora_B` and map to base weight `{module}.weight`.
+
+Any other variant or rank is rejected at startup rather than adapted dynamically.
+See [`app/breeze_lora_server/README.md`](app/breeze_lora_server/README.md) for the full
+manifest schema and a worked `adapter_config.json`.
+
+---
+
+## API
+
+### `GET /health`
+
+```json
+{"status":"ok"}
+```
+
+### `GET /v1/models`
+
+```json
+{"object":"list","data":[
+  {"id":"breeze-base","object":"model","owned_by":"breeze-lora-server",
+   "default_instruction":"Speak clearly and naturally.","has_voice_ref":false}
+]}
+```
+
+### `POST /v1/audio/speech`
+
+```bash
+curl -sS http://127.0.0.1:8080/v1/audio/speech \
+  -H 'Content-Type: application/json' \
+  -o out.wav \
+  -d '{"model":"my-voice","input":"The train arrives in five minutes.","seed":42}'
+```
+
+| Field | Meaning |
+|---|---|
+| `model` | Required. `breeze-base` or a configured adapter id. Unknown ids return `400`. |
+| `input` | Required, non-empty text. |
+| `instruction` | Optional voice direction. Falls back to the model's `default_instruction`. |
+| `voice_ref` / `reference_text` | Optional request-level clone override. Must be supplied **together**. |
+| `seed`, `guidance_scale`, `temperature`, `depth_temperature`, `top_k`, `top_p`, `max_tokens` | Breeze sampling controls. |
+
+Returns `audio/wav` (a complete RIFF/WAVE body). `stream`, `stream_format`, and any
+`response_format` other than `wav` are rejected with `400`.
+
+Errors are JSON with a stable `type`:
+
+| Status | `type` | When |
+|---|---|---|
+| `400` | `invalid_request_error` | Missing/invalid fields, unknown model, unsupported format |
+| `503` | `server_error` | `queue_full` — more than `max_queue_depth` requests waiting |
+| `500` | `server_error` | Synthesis failure |
+
+#### Request logging
+
+Every speech job logs exactly one line. **Request text is never logged.**
+
+```text
+[info][breeze_lora_server] speech request model=<id> first_load=<true|false> load_ms=<ms> generate_ms=<ms> status=ok
+```
+
+- `first_load=true` on the first live activation of that id in the process.
+  `breeze-base` is activated at startup, so its first request is not a first load.
+- `load_ms` is the adapter/base switch time, `0.0` when the id is already active.
+- Failures log the same fields with `status=error`.
+
+Logging is on by default to stdout; `--log-file <path>` appends to a file instead.
+
+---
+
+## Building and testing
+
+### Container verification
+
+```bash
+.devops/verify_docker.sh cpu    # build CPU image, then run unit tests inside it
+.devops/verify_docker.sh cuda   # build CUDA image only (tests need a GPU host)
+```
+
+`DOCKER_EXIT=0` in the log/marker means the build (and, for CPU, the unit tests)
+succeeded. On Windows, `.devops/verify_cpu_docker.ps1` is the equivalent harness.
+
+### Unit tests
+
+| Binary | Coverage |
+|---|---|
+| `breeze_lora_math_test` | Side-path math `W·x + scale·B·(A·x)`, disabled path equals `W·x`, merge equivalence |
+| `breeze_lora_manifest_test` | Manifest schema/variant/rank validation and adapter checksums |
+| `breeze_lora_server_config_test` | Config parsing, path resolution, required-pair rules, duplicate id rejection |
+
+### Native build
+
+```bash
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DENGINE_ENABLE_CUDA=OFF -DENGINE_BUILD_TESTS=ON
+cmake --build build --parallel --target breeze_lora_server \
+  breeze_lora_math_test breeze_lora_manifest_test breeze_lora_server_config_test
+```
+
+### Smoke test
+
+With a server running:
+
+```bash
+SMOKE_MODELS="breeze-base adapter-a adapter-b adapter-a breeze-base" \
+  ./scripts/smoke_breeze_lora_server.sh
+```
+
+It checks `/health`, `/v1/models`, requests each id in order, verifies every response
+is RIFF/WAVE, and confirms an unknown model returns `400`.
+
+---
+
+## Continuous integration
+
+| Workflow | Purpose |
+|---|---|
+| [`.github/workflows/cpu-image.yml`](.github/workflows/cpu-image.yml) | Builds the CPU image, runs the three unit-test binaries inside it, pushes `:cpu` and `:cpu-<sha>` to GHCR |
+| [`.github/workflows/cuda-image.yml`](.github/workflows/cuda-image.yml) | Builds the CUDA image with a configurable `CUDA_DOCKER_ARCH`, pushes `:cuda` and `:cuda-<sha>` to GHCR |
+
+Both workflows are path-filtered to the Breeze server surface and can be run manually
+via `workflow_dispatch`. The CUDA architecture list defaults to `80;86;89;90`.
+
+---
+
+## Moving to a true side-adapter path
+
+The remaining work to reach the original design is localized:
+
+1. Give `LinearWeights` (`include/engine/framework/modules/linear_module.h`) optional
+   `lora_a` / `lora_b` / `lora_scale` tensors.
+2. In `LinearModule::build` (`src/framework/modules/linear_module.cpp`), when those are
+   present emit `ggml_mul_mat(a, x)` → `ggml_mul_mat(b, ·)` → `ggml_scale` → `ggml_add`
+   against the existing base `ggml_mul_mat` result.
+3. Bind A/B into the decoder's per-request graph build so switching an adapter changes
+   only the bound buffers, leaving base weights untouched.
+
+Packed targets (`qkv_weight`, `gate_up_proj`) already slice per-projection rows via
+`SliceModule`, so per-projection side paths fit the existing structure. The merge path
+in `lora.cpp` should then be deleted rather than kept alongside.
+
+---
+
+## Licensing
+
+| Artifact | License |
+|---|---|
+| This repository's code (incl. `app/breeze_lora_server`, `src/models/breeze_tts/lora.cpp`) | Apache-2.0, inherited from upstream `audio.cpp` (© ShugoAI LLC) |
+| Breeze TTS 2 **weights** and any adapter / fine-tune / self-hosted derivative | [BreezeBlue Research and Non-Commercial License](https://huggingface.co/BreezeBlue/Breeze-TTS-2/blob/main/LICENSE) |
+
+LoRAs and fine-tunes are **Derivative Models** under the BreezeBlue agreement:
+research and non-commercial use only unless you hold a separate commercial license
+from BreezeBlue / RESONIA. Commercial use of the weights is **not** granted by this
+repository's Apache-2.0 code license. Training tooling is third-party and independent
+of BreezeBlue; see [`app/breeze_lora_server/README.md`](app/breeze_lora_server/README.md).
+
+## Provenance
+
+Upstream project: [`0xShug0/audio.cpp`](https://github.com/0xShug0/audio.cpp) at
+`ed96b7307c8daba2ebcf7912af928825f6b14cb9`. Upstream model packages live in the
+`audio-cpp` HuggingFace repositories; the upstream README and `docs/` are retained for
+the wider model catalog this runtime can load.

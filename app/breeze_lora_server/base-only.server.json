@@ -1,0 +1,17 @@
+{
+  "host": "0.0.0.0",
+  "port": 8080,
+  "backend": "cpu",
+  "device": 0,
+  "threads": 4,
+  "max_queue_depth": 4,
+  "base_model": "/models/Breeze-TTS-2-GGUF",
+  "base_revision": "",
+  "models": [
+    {
+      "id": "breeze-base",
+      "lora": null,
+      "default_instruction": "Speak clearly and naturally."
+    }
+  ]
+}

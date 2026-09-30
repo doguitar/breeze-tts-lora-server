@@ -1,0 +1,31 @@
+{
+  "host": "0.0.0.0",
+  "port": 8080,
+  "backend": "cuda",
+  "device": 0,
+  "threads": 1,
+  "max_queue_depth": 8,
+  "base_model": "/models/Breeze-TTS-2-GGUF",
+  "base_revision": "799624c0b4a1daa8db6d28bbd9850043c0270734",
+  "models": [
+    {
+      "id": "breeze-base",
+      "lora": null,
+      "default_instruction": "Speak clearly and naturally."
+    },
+    {
+      "id": "adapter-a",
+      "lora": "/loras/adapter-a",
+      "default_instruction": "Speak clearly and naturally.",
+      "voice_ref": "/loras/adapter-a/reference.wav",
+      "reference_text_file": "/loras/adapter-a/reference.txt"
+    },
+    {
+      "id": "adapter-b",
+      "lora": "/loras/adapter-b",
+      "default_instruction": "Speak with a calm narrator tone.",
+      "voice_ref": "/loras/adapter-b/reference.wav",
+      "reference_text": "Transcript of the reference recording for adapter-b."
+    }
+  ]
+}
