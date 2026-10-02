@@ -43,27 +43,42 @@ jobs:
   cpu:
     name: CPU image + unit tests
     runs-on: ubuntu-24.04
+    # The CPU build compiles the full engine from source; an explicit ceiling
+    # turns a stalled build into a timeout (with the diagnostics below) instead
+    # of an opaque runner disconnect.
+    timeout-minutes: 120
     steps:
       - name: Checkout
         uses: actions/checkout@v5
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@v4
 
       - name: Log in to GHCR
         if: github.event_name != 'pull_request'
-        uses: docker/login-action@v3
+        uses: docker/login-action@v4
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Docker diagnostics
+        run: |
+          echo "== host =="
+          nproc
+          free -m | sed -n '1,2p'
+          df -h /
+          echo "== docker =="
+          docker version
+          docker buildx version
+          docker info --format 'CPUs={{.NCPU}} MemTotal={{.MemTotal}} Driver={{.Driver}}'
 
       - name: Compute image tags
         id: meta
         run: echo "short_sha=$(git rev-parse --short=12 HEAD)" >> "$GITHUB_OUTPUT"
 
       - name: Build CPU image
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: .
           file: .devops/breeze_lora_cpu.Dockerfile
@@ -88,7 +103,7 @@ jobs:
           done
 
       - name: Export runtime CPU image
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: .
           file: .devops/breeze_lora_cpu.Dockerfile
@@ -97,6 +112,16 @@ jobs:
             ghcr.io/${{ github.repository }}:cpu
             ghcr.io/${{ github.repository }}:cpu-${{ steps.meta.outputs.short_sha }}
           cache-from: type=gha,scope=cpu
+
+      - name: Verify runtime image
+        run: |
+          set -euo pipefail
+          tag="ghcr.io/${{ github.repository }}:cpu-${{ steps.meta.outputs.short_sha }}"
+          # The runtime stage must actually contain the server and its config;
+          # fail here rather than at first deploy.
+          docker run --rm --entrypoint /bin/sh "$tag" -c \
+            'test -x /app/breeze_lora_server && test -f /app/example.server.json'
+          docker image inspect "$tag" --format 'image={{.Id}} size={{.Size}}'
 
       - name: Push image
         if: github.event_name != 'pull_request'

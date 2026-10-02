@@ -14,7 +14,7 @@ RUN cmake -S . -B build \
       -DENGINE_ENABLE_CUDA=ON \
       -DENGINE_BUILD_TESTS=ON \
       -DAUDIOCPP_BUILD_NATIVE_MODEL_MANAGER=OFF \
-      -DGGML_CUDA_ARCHITECTURES=${CUDA_DOCKER_ARCH} \
+      -DCMAKE_CUDA_ARCHITECTURES="${CUDA_DOCKER_ARCH}" \
  && cmake --build build --parallel --target breeze_lora_server breeze_lora_math_test breeze_lora_manifest_test breeze_lora_server_config_test
 
 FROM nvidia/cuda:${CUDA_VERSION}-runtime-ubuntu22.04

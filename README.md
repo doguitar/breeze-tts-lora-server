@@ -346,7 +346,11 @@ is RIFF/WAVE, and confirms an unknown model returns `400`.
 | [`.github/workflows/cuda-image.yml`](.github/workflows/cuda-image.yml) | Builds the CUDA image with a configurable `CUDA_DOCKER_ARCH`, pushes `:cuda` and `:cuda-<sha>` to GHCR |
 
 Both workflows are path-filtered to the Breeze server surface and can be run manually
-via `workflow_dispatch`. The CUDA architecture list defaults to `80;86;89;90`.
+via `workflow_dispatch`. The CUDA architecture list defaults to `80;86;89;90` and is
+passed to CMake as `-DCMAKE_CUDA_ARCHITECTURES`; each entry is a bare SM number
+(`80`) or a suffixed form (`86-real`, `90-virtual`). Keeping this list explicit
+matters: without it the engine falls back to its portable default architecture list
+and compiles every `.cu` file once per architecture.
 
 ---
 
