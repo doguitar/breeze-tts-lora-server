@@ -2173,6 +2173,7 @@ audiocpp_add_model(breeze_tts
         src/models/breeze_tts/assets.cpp
         src/models/breeze_tts/generator.cpp
         src/models/breeze_tts/lora.cpp
+        src/models/breeze_tts/lora_linear.cpp
         src/models/breeze_tts/session.cpp
         src/models/breeze_tts/speech_decoder.cpp
         src/models/breeze_tts/speech_encoder.cpp
@@ -3042,6 +3043,14 @@ if (ENGINE_BUILD_TESTS OR ENGINE_BUILD_EXTENDED_TESTS OR ENGINE_BUILD_MODEL_TEST
         add_engine_unittest(breeze_lora_manifest_test tests/unittests/test_breeze_lora_manifest.cpp)
         target_include_directories(breeze_lora_manifest_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/tests/unittests)
         add_test(NAME breeze_lora_manifest_test COMMAND breeze_lora_manifest_test)
+        add_engine_unittest(breeze_lora_activation_test tests/unittests/test_breeze_lora_activation.cpp)
+        target_include_directories(breeze_lora_activation_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/tests/unittests)
+        target_link_libraries(breeze_lora_activation_test PRIVATE engine_model_breeze_tts)
+        add_test(NAME breeze_lora_activation_test COMMAND breeze_lora_activation_test)
+        add_engine_unittest(breeze_lora_side_adapter_test tests/unittests/test_breeze_lora_side_adapter.cpp)
+        target_include_directories(breeze_lora_side_adapter_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/tests/unittests)
+        target_link_libraries(breeze_lora_side_adapter_test PRIVATE engine_model_breeze_tts)
+        add_test(NAME breeze_lora_side_adapter_test COMMAND breeze_lora_side_adapter_test)
         add_executable(breeze_lora_server_config_test
             tests/unittests/test_breeze_lora_server_config.cpp
             app/breeze_lora_server/config.cpp)
@@ -3597,6 +3606,14 @@ if (ENGINE_BUILD_TESTS OR ENGINE_BUILD_EXTENDED_TESTS OR ENGINE_BUILD_MODEL_TEST
         add_engine_unittest(
             decoder_packed_projection_test
             tests/unittests/test_decoder_packed_projections.cpp
+        )
+        add_engine_unittest(
+            decoder_packed_hook_test
+            tests/unittests/test_decoder_packed_hook.cpp
+        )
+        add_test(
+            NAME decoder_packed_hook_test
+            COMMAND decoder_packed_hook_test
         )
         add_engine_unittest(causal_decoder_chunked_prefill_test tests/unittests/test_causal_decoder_chunked_prefill.cpp)
         add_test(NAME causal_decoder_chunked_prefill_test COMMAND causal_decoder_chunked_prefill_test)

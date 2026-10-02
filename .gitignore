@@ -1,5 +1,7 @@
 /build*/
 /cmake-build*/
+# Local build log/exit-marker directory used by .devops/build_cuda_detached.sh
+/.build/
 ._*
 .idea/
 .vs/

@@ -1,5 +1,7 @@
 #include "engine/framework/modules/transformers/decoder.h"
 
+#include <functional>
+
 #include "engine/framework/modules/activation_modules.h"
 #include "engine/framework/modules/optimizations/fast_kv_modules.h"
 #include "engine/framework/modules/positional_modules.h"
@@ -309,6 +311,28 @@ QKVProjections build_qkv_projections(
         if (!weights.self_attention.qkv_weight.has_value()) {
             throw std::runtime_error("Qwen packed QKV layout requires self_attention.qkv_weight");
         }
+        const auto & qkv_weight = *weights.self_attention.qkv_weight;
+        const auto & hook = config.side_adapter_linear;
+        const auto qkv_side = [&](const std::string & module, int64_t rows, int64_t offset) {
+            auto view = core::wrap_tensor(
+                ggml_view_2d(
+                    ctx.ggml,
+                    qkv_weight.tensor,
+                    config.hidden_size,
+                    rows,
+                    qkv_weight.tensor->nb[1],
+                    static_cast<size_t>(offset) * qkv_weight.tensor->nb[1]),
+                core::TensorShape::from_dims({rows, config.hidden_size}),
+                qkv_weight.type);
+            return hook(ctx, module, input, modules::LinearWeights{view, std::nullopt}, config.hidden_size, rows, config.projection_precision);
+        };
+        if (hook) {
+            return {
+                qkv_side("self_attn.q_proj", q_out, 0),
+                qkv_side("self_attn.k_proj", kv_out, q_out),
+                qkv_side("self_attn.v_proj", kv_out, q_out + kv_out),
+            };
+        }
         auto qkv = LinearModule(
                        {
                            config.hidden_size,
@@ -386,15 +410,25 @@ core::TensorValue build_mlp(
     const core::TensorValue & input,
     const DecoderLayerConfig & config,
     const DecoderMLPWeights & weights) {
+    const auto & hook = config.side_adapter_linear;
     if (config.runtime.mlp.mode == DecoderMLPMode::Exact) {
-        auto gate = LinearModule(
-                        {
-                            config.hidden_size,
-                            config.intermediate_size,
-                            weights.gate_proj.bias.has_value(),
-                            config.projection_precision,
-                        })
-                        .build(ctx, input, require_linear(weights.gate_proj, false, "QwenMLPWeights.gate_proj"));
+        auto gate = hook
+            ? hook(
+                  ctx,
+                  "mlp.gate_proj",
+                  input,
+                  weights.gate_proj,
+                  config.hidden_size,
+                  config.intermediate_size,
+                  config.projection_precision)
+            : LinearModule(
+                  {
+                      config.hidden_size,
+                      config.intermediate_size,
+                      weights.gate_proj.bias.has_value(),
+                      config.projection_precision,
+                  })
+                  .build(ctx, input, require_linear(weights.gate_proj, false, "QwenMLPWeights.gate_proj"));
         if (config.activation_cast.enabled && config.activation_cast.after_mlp_projection) {
             gate = activation_cast(ctx, gate, config.activation_cast);
         }
@@ -402,14 +436,23 @@ core::TensorValue build_mlp(
         if (config.activation_cast.enabled && config.activation_cast.after_mlp_silu) {
             gate = activation_cast(ctx, gate, config.activation_cast);
         }
-        auto up = LinearModule(
-                      {
-                          config.hidden_size,
-                          config.intermediate_size,
-                          weights.up_proj.bias.has_value(),
-                          config.projection_precision,
-                      })
-                      .build(ctx, input, require_linear(weights.up_proj, false, "QwenMLPWeights.up_proj"));
+        auto up = hook
+            ? hook(
+                  ctx,
+                  "mlp.up_proj",
+                  input,
+                  weights.up_proj,
+                  config.hidden_size,
+                  config.intermediate_size,
+                  config.projection_precision)
+            : LinearModule(
+                  {
+                      config.hidden_size,
+                      config.intermediate_size,
+                      weights.up_proj.bias.has_value(),
+                      config.projection_precision,
+                  })
+                  .build(ctx, input, require_linear(weights.up_proj, false, "QwenMLPWeights.up_proj"));
         if (config.activation_cast.enabled && config.activation_cast.after_mlp_projection) {
             up = activation_cast(ctx, up, config.activation_cast);
         }
@@ -439,20 +482,46 @@ core::TensorValue build_mlp(
         if (!weights.gate_up_proj.has_value()) {
             throw std::runtime_error("QwenMLPWeights.gate_up_proj is required for packed gate/up mode");
         }
-        auto gate_up = LinearModule(
-                           {
-                               config.hidden_size,
-                               config.intermediate_size * 2,
-                               weights.gate_up_proj->bias.has_value(),
-                               config.projection_precision,
-                           })
-                           .build(
-                               ctx,
-                               input,
-                               require_linear(*weights.gate_up_proj, false, "QwenMLPWeights.gate_up_proj"));
-        packed_gate_up = gate_up;
-        gate = SliceModule({2, 0, config.intermediate_size}).build(ctx, gate_up);
-        up = SliceModule({2, config.intermediate_size, config.intermediate_size}).build(ctx, gate_up);
+        const auto & gate_up_weight = weights.gate_up_proj->weight;
+        const auto gate_up_side = [&](const std::string & module, int64_t offset) {
+            auto view = core::wrap_tensor(
+                ggml_view_2d(
+                    ctx.ggml,
+                    gate_up_weight.tensor,
+                    config.hidden_size,
+                    config.intermediate_size,
+                    gate_up_weight.tensor->nb[1],
+                    static_cast<size_t>(offset) * gate_up_weight.tensor->nb[1]),
+                core::TensorShape::from_dims({config.intermediate_size, config.hidden_size}),
+                gate_up_weight.type);
+            return hook(
+                ctx,
+                module,
+                input,
+                modules::LinearWeights{view, std::nullopt},
+                config.hidden_size,
+                config.intermediate_size,
+                config.projection_precision);
+        };
+        if (hook) {
+            gate = gate_up_side("mlp.gate_proj", 0);
+            up = gate_up_side("mlp.up_proj", config.intermediate_size);
+        } else {
+            auto gate_up = LinearModule(
+                               {
+                                   config.hidden_size,
+                                   config.intermediate_size * 2,
+                                   weights.gate_up_proj->bias.has_value(),
+                                   config.projection_precision,
+                               })
+                               .build(
+                                   ctx,
+                                   input,
+                                   require_linear(*weights.gate_up_proj, false, "QwenMLPWeights.gate_up_proj"));
+            packed_gate_up = gate_up;
+            gate = SliceModule({2, 0, config.intermediate_size}).build(ctx, gate_up);
+            up = SliceModule({2, config.intermediate_size, config.intermediate_size}).build(ctx, gate_up);
+        }
     } else {
         gate = LinearModule(
                    {
@@ -477,7 +546,7 @@ core::TensorValue build_mlp(
          !config.activation_cast.after_mlp_silu &&
          !config.activation_cast.after_mlp_mul);
     core::TensorValue gated;
-    if (can_use_fused_swiglu && mlp_mode == DecoderMLPMode::PackedGateUp) {
+    if (can_use_fused_swiglu && mlp_mode == DecoderMLPMode::PackedGateUp && packed_gate_up.has_value()) {
         gated = core::wrap_tensor(
             ggml_swiglu(ctx.ggml, packed_gate_up->tensor),
             core::TensorShape::from_dims({
@@ -486,7 +555,10 @@ core::TensorValue build_mlp(
                 config.intermediate_size,
             }),
             packed_gate_up->type);
-    } else if (can_use_fused_swiglu && mlp_mode == DecoderMLPMode::FusedSwiGLU) {
+    } else if (can_use_fused_swiglu && (mlp_mode == DecoderMLPMode::FusedSwiGLU ||
+                                        mlp_mode == DecoderMLPMode::PackedGateUp)) {
+        // The side-adapter hook splits packed gate/up into two projections, so the
+        // fused single-tensor swiglu above cannot apply; take the split swiglu path.
         gated = core::wrap_tensor(
             ggml_swiglu_split(ctx.ggml, gate.tensor, up.tensor),
             gate.shape,
@@ -505,14 +577,23 @@ core::TensorValue build_mlp(
             gated = activation_cast(ctx, gated, config.activation_cast);
         }
     }
-    auto down = LinearModule(
-                    {
-                        config.intermediate_size,
-                        config.hidden_size,
-                        weights.down_proj.bias.has_value(),
-                        config.projection_precision,
-                    })
-                    .build(ctx, gated, require_linear(weights.down_proj, false, "QwenMLPWeights.down_proj"));
+    auto down = hook
+        ? hook(
+              ctx,
+              "mlp.down_proj",
+              gated,
+              weights.down_proj,
+              config.intermediate_size,
+              config.hidden_size,
+              config.projection_precision)
+        : LinearModule(
+              {
+                  config.intermediate_size,
+                  config.hidden_size,
+                  weights.down_proj.bias.has_value(),
+                  config.projection_precision,
+              })
+              .build(ctx, gated, require_linear(weights.down_proj, false, "QwenMLPWeights.down_proj"));
     if (config.activation_cast.enabled && config.activation_cast.after_mlp_projection) {
         down = activation_cast(ctx, down, config.activation_cast);
     }
@@ -676,17 +757,26 @@ DecoderLayerOutputs DecoderLayerModule::build(
         context,
         core::TensorShape::from_dims({input.shape.dims[0], input.shape.dims[1], config_.num_attention_heads * dim}));
 
-    auto attn_out = LinearModule(
-                        {
-                            config_.num_attention_heads * dim,
-                            config_.hidden_size,
-                            weights.self_attention.out_bias.has_value(),
-                            config_.projection_precision,
-                        })
-                        .build(
-                            ctx,
-                            context,
-                            {weights.self_attention.out_weight, weights.self_attention.out_bias});
+    auto attn_out = config_.side_adapter_linear
+        ? config_.side_adapter_linear(
+              ctx,
+              "self_attn.o_proj",
+              context,
+              modules::LinearWeights{weights.self_attention.out_weight, weights.self_attention.out_bias},
+              config_.num_attention_heads * dim,
+              config_.hidden_size,
+              config_.projection_precision)
+        : LinearModule(
+              {
+                  config_.num_attention_heads * dim,
+                  config_.hidden_size,
+                  weights.self_attention.out_bias.has_value(),
+                  config_.projection_precision,
+              })
+              .build(
+                  ctx,
+                  context,
+                  {weights.self_attention.out_weight, weights.self_attention.out_bias});
     if (config_.activation_cast.enabled && config_.activation_cast.after_attention_output) {
         attn_out = activation_cast(ctx, attn_out, config_.activation_cast);
     }
@@ -881,17 +971,26 @@ DecoderLayerOutputs DecoderLayerModule::build_static_cache_impl(
         context,
         core::TensorShape::from_dims({1, block ? input.shape.dims[1] : 1, config_.num_attention_heads * dim}));
 
-    auto attn_out = LinearModule(
-                        {
-                            config_.num_attention_heads * dim,
-                            config_.hidden_size,
-                            weights.self_attention.out_bias.has_value(),
-                            config_.projection_precision,
-                        })
-                        .build(
-                            ctx,
-                            context,
-                            {weights.self_attention.out_weight, weights.self_attention.out_bias});
+    auto attn_out = config_.side_adapter_linear
+        ? config_.side_adapter_linear(
+              ctx,
+              "self_attn.o_proj",
+              context,
+              modules::LinearWeights{weights.self_attention.out_weight, weights.self_attention.out_bias},
+              config_.num_attention_heads * dim,
+              config_.hidden_size,
+              config_.projection_precision)
+        : LinearModule(
+              {
+                  config_.num_attention_heads * dim,
+                  config_.hidden_size,
+                  weights.self_attention.out_bias.has_value(),
+                  config_.projection_precision,
+              })
+              .build(
+                  ctx,
+                  context,
+                  {weights.self_attention.out_weight, weights.self_attention.out_bias});
     if (config_.activation_cast.enabled && config_.activation_cast.after_attention_output) {
         attn_out = activation_cast(ctx, attn_out, config_.activation_cast);
     }
@@ -1039,17 +1138,26 @@ DecoderLayerOutputs DecoderLayerModule::build_with_static_cache_tail_batched(
         context,
         core::TensorShape::from_dims({input.shape.dims[0], input.shape.dims[1], config_.num_attention_heads * dim}));
 
-    auto attn_out = LinearModule(
-                        {
-                            config_.num_attention_heads * dim,
-                            config_.hidden_size,
-                            weights.self_attention.out_bias.has_value(),
-                            config_.projection_precision,
-                        })
-                        .build(
-                            ctx,
-                            context,
-                            {weights.self_attention.out_weight, weights.self_attention.out_bias});
+    auto attn_out = config_.side_adapter_linear
+        ? config_.side_adapter_linear(
+              ctx,
+              "self_attn.o_proj",
+              context,
+              modules::LinearWeights{weights.self_attention.out_weight, weights.self_attention.out_bias},
+              config_.num_attention_heads * dim,
+              config_.hidden_size,
+              config_.projection_precision)
+        : LinearModule(
+              {
+                  config_.num_attention_heads * dim,
+                  config_.hidden_size,
+                  weights.self_attention.out_bias.has_value(),
+                  config_.projection_precision,
+              })
+              .build(
+                  ctx,
+                  context,
+                  {weights.self_attention.out_weight, weights.self_attention.out_bias});
     if (config_.activation_cast.enabled && config_.activation_cast.after_attention_output) {
         attn_out = activation_cast(ctx, attn_out, config_.activation_cast);
     }
@@ -1103,8 +1211,13 @@ DecoderStackOutputs DecoderStackModule::build(
     auto output = input;
     DecoderStackState state;
     state.layers.reserve(weights.layers.size());
-    const DecoderLayerModule layer_module(decoder_layer_config_from_stack(config_));
     for (size_t layer_index = 0; layer_index < weights.layers.size(); ++layer_index) {
+        auto layer_config = decoder_layer_config_from_stack(config_);
+        if (config_.side_adapter_layer_linear) {
+            layer_config.side_adapter_linear =
+                config_.side_adapter_layer_linear(static_cast<int64_t>(layer_index));
+        }
+        const DecoderLayerModule layer_module(layer_config);
         const auto * layer_prefix = prefix_state.has_value() ? &prefix_state->layers[layer_index] : nullptr;
         auto layer = layer_module.build(
             ctx,

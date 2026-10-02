@@ -7,10 +7,12 @@
 #include "engine/framework/modules/primitive_modules.h"
 #include "engine/framework/modules/text_encoders/t5_gemma_encoder.h"
 #include "engine/framework/modules/weight_binding.h"
+#include "engine/models/breeze_tts/lora_linear.h"
 
 #include <algorithm>
 #include <chrono>
 #include <stdexcept>
+#include <unordered_set>
 #include <utility>
 
 namespace engine::models::breeze_tts {
@@ -93,7 +95,9 @@ std::shared_ptr<const BreezeT5Gemma2TextWeights> load_text_weights(
     const BreezeTTSAssets & assets,
     core::ExecutionContext & execution,
     size_t weight_context_bytes,
-    assets::TensorStorageType storage_type) {
+    assets::TensorStorageType storage_type,
+    BreezeLoraManager & lora_manager,
+    const std::vector<std::pair<std::string, std::filesystem::path>> & lora_adapters) {
     auto out = std::make_shared<BreezeT5Gemma2TextWeights>();
     out->store = std::make_shared<core::BackendWeightStore>(
         execution.backend(),
@@ -120,6 +124,26 @@ std::shared_ptr<const BreezeT5Gemma2TextWeights> load_text_weights(
         config.hidden_size,
         config.text_hidden_size,
         false);
+    {
+        const auto & projector = out->projector.weight;
+        BreezeLoraTargetBinding target;
+        target.module_name = "text_encoder_proj";
+        target.out_features = config.hidden_size;
+        target.in_features = config.text_hidden_size;
+        target.base_f32 = source.require_f32(
+            "text_encoder_proj.weight",
+            {config.hidden_size, config.text_hidden_size});
+        target.live = projector.tensor;
+        target.live_shape = projector.shape;
+        target.live_type = projector.type;
+        target.row_offset = 0;
+        lora_manager.bind_target(std::move(target));
+        const std::unordered_set<std::string> text_modules{"text_encoder_proj"};
+        lora_manager.validate_registered_adapters(&text_modules);
+        for (const auto & [model_id, adapter_path] : lora_adapters) {
+            lora_manager.create_side_branch_tensors(model_id, *out->store, &text_modules);
+        }
+    }
     out->store->upload();
     return out;
 }
@@ -159,10 +183,14 @@ struct BreezeT5Gemma2TextEncoderRuntime::Impl {
                 positions_value,
                 attention_value,
                 this->weights->encoder);
-            auto projected = modules::LinearModule({config.text_hidden_size, config.hidden_size, false, GGML_PREC_DEFAULT}).build(
+            auto projected = build_adapter_linear(
                 build,
                 encoded,
-                this->weights->projector);
+                this->weights->projector,
+                config.text_hidden_size,
+                config.hidden_size,
+                GGML_PREC_DEFAULT,
+                BreezeLoraLinearScope::resolve("text_encoder_proj"));
             output = core::ensure_backend_addressable_layout(build, projected).tensor;
             ggml_set_input(input_ids);
             ggml_set_input(positions);
@@ -230,11 +258,19 @@ struct BreezeT5Gemma2TextEncoderRuntime::Impl {
         core::ExecutionContext & execution,
         size_t graph_arena_bytes,
         size_t weight_context_bytes,
-        assets::TensorStorageType storage_type)
+        assets::TensorStorageType storage_type,
+        BreezeLoraManager & lora_manager,
+        const std::vector<std::pair<std::string, std::filesystem::path>> & lora_adapters)
         : assets(std::move(assets)),
           execution(execution),
           graph_arena_bytes(graph_arena_bytes),
-          weights(load_text_weights(*this->assets, execution, weight_context_bytes, storage_type)) {}
+          weights(load_text_weights(
+              *this->assets,
+              execution,
+              weight_context_bytes,
+              storage_type,
+              lora_manager,
+              lora_adapters)) {}
 
     BreezeProjectedText encode(const std::vector<int32_t> & input_ids) {
         const auto start = Clock::now();
@@ -266,8 +302,17 @@ BreezeT5Gemma2TextEncoderRuntime::BreezeT5Gemma2TextEncoderRuntime(
     engine::core::ExecutionContext & execution,
     size_t graph_arena_bytes,
     size_t weight_context_bytes,
-    engine::assets::TensorStorageType storage_type)
-    : impl_(std::make_unique<Impl>(std::move(assets), execution, graph_arena_bytes, weight_context_bytes, storage_type)) {}
+    engine::assets::TensorStorageType storage_type,
+    BreezeLoraManager & lora_manager,
+    const std::vector<std::pair<std::string, std::filesystem::path>> & lora_adapters)
+    : impl_(std::make_unique<Impl>(
+          std::move(assets),
+          execution,
+          graph_arena_bytes,
+          weight_context_bytes,
+          storage_type,
+          lora_manager,
+          lora_adapters)) {}
 
 BreezeT5Gemma2TextEncoderRuntime::~BreezeT5Gemma2TextEncoderRuntime() = default;
 
@@ -300,6 +345,13 @@ void BreezeT5Gemma2TextEncoderRuntime::bind_lora_targets(BreezeLoraManager & man
     binding.live_type = projector.type;
     binding.row_offset = 0;
     manager.bind_target(std::move(binding));
+    for (const auto & model_id : manager.model_ids()) {
+        if (model_id == kBreezeBaseModelId) {
+            continue;
+        }
+        manager.create_side_branch_tensors(model_id, *impl_->weights->store);
+    }
+    impl_->weights->store->upload();
 }
 
 }  // namespace engine::models::breeze_tts

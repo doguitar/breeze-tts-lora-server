@@ -55,7 +55,9 @@ public:
         size_t weight_context_bytes,
         engine::assets::TensorStorageType storage_type,
         engine::core::AttentionPreference attention_preference = engine::core::AttentionPreference::Auto,
-        Bf16ActivationMode bf16_activations = Bf16ActivationMode::Auto);
+        Bf16ActivationMode bf16_activations = Bf16ActivationMode::Auto,
+        std::vector<std::pair<std::string, std::filesystem::path>> lora_adapters = {},
+        std::string base_revision = {});
     ~BreezeGeneratorRuntime();
 
     engine::runtime::AudioBuffer generate(const BreezeGenerationRequest & request);

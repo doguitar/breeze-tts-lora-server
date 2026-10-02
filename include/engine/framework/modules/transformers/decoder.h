@@ -5,7 +5,9 @@
 #include "engine/framework/modules/linear_module.h"
 #include "engine/framework/modules/norm_modules.h"
 
+#include <functional>
 #include <optional>
+#include <string>
 #include <vector>
 
 struct ggml_cgraph;
@@ -113,6 +115,15 @@ struct DecoderLayerConfig {
     bool use_qk_norm = true;
     DecoderActivationCastPolicy activation_cast;
     DecoderRuntimePolicy runtime;
+    // Optional Breeze side-adapter hook, copied per layer into DecoderLayerConfig.
+    std::function<core::TensorValue(
+        core::ModuleBuildContext & ctx,
+        const std::string & module_name,
+        const core::TensorValue & input,
+        const LinearWeights & weights,
+        int64_t in_features,
+        int64_t out_features,
+        ggml_prec precision)> side_adapter_linear;
 };
 
 struct DecoderMLPWeights {
@@ -132,6 +143,17 @@ struct DecoderLayerWeights {
     // Optional per-frequency RoPE divisors (head_dim / 2), used by Llama-3
     // scaling and compatible checkpoints.
     std::optional<core::TensorValue> rope_frequency_factors;
+    // Optional side adapter for this layer prefix. Breeze installs a hook; every
+    // other caller leaves it null, which keeps the plain LinearModule path.
+    // `prefix` is the per-layer module prefix, e.g. "backbone_model.layers.3".
+    std::function<core::TensorValue(
+        core::ModuleBuildContext & ctx,
+        const std::string & module_name,
+        const core::TensorValue & input,
+        const LinearWeights & weights,
+        int64_t in_features,
+        int64_t out_features,
+        ggml_prec precision)> side_adapter_linear;
 };
 
 struct DecoderLayerOutputs {
@@ -223,6 +245,16 @@ struct DecoderStackConfig {
     bool use_qk_norm = true;
     DecoderActivationCastPolicy activation_cast;
     DecoderRuntimePolicy runtime;
+    // Optional Breeze side-adapter hook factory. When set, the stack asks for a
+    // per-layer callback so fully qualified module names resolve correctly.
+    std::function<std::function<core::TensorValue(
+        core::ModuleBuildContext & ctx,
+        const std::string & module_name,
+        const core::TensorValue & input,
+        const LinearWeights & weights,
+        int64_t in_features,
+        int64_t out_features,
+        ggml_prec precision)>(int64_t layer)> side_adapter_layer_linear;
 };
 
 DecoderLayerConfig decoder_layer_config_from_stack(const DecoderStackConfig & config);

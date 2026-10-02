@@ -157,7 +157,7 @@ Rules:
 - Config paths (`lora`, `voice_ref`, `reference_text_file`, `base_model`) are
   resolved relative to the directory containing `server.json`. Prefer mounting
   the config beside the model tree (for example `/models/server.json`) so
-  relatives like `loras/serling/reference.wav` resolve inside the same mount.
+  relatives like `loras/my-voice/reference.wav` resolve inside the same mount.
 - Request-level `voice_ref` paths are also resolved relative to that config
   directory when they are not absolute.
 - Invalid adapters / voice refs **fail startup**; they are not skipped.
@@ -205,8 +205,9 @@ Example:
 
 - `first_load=true` on the first live activation of that model id in the process
   (`breeze-base` is activated at startup, so its first request is not a first load).
-- `load_ms` is the adapter/base switch time when weights are uploaded; `0.0` when
-  the requested model is already active.
+- `load_ms` is the adapter/base switch time; switching only rebinds side-adapter
+  buffers, so this is normally `0.0`, and it is `0.0` when the requested model is
+  already active.
 - Failures use `status=error` with the same timing fields (still no request text).
 
 ## Config
@@ -227,9 +228,9 @@ Base-only speech smoke (no LoRA) against a mounted GGUF package:
 
 ```powershell
 docker run --rm -p 8080:8080 `
-  -v F:\audio-cpp\models\Breeze-TTS-2-GGUF:/models/Breeze-TTS-2-GGUF:ro `
+  -v '<HOST_MODEL_DIR>\Breeze-TTS-2-GGUF:/models/Breeze-TTS-2-GGUF:ro' `
   -v $PWD\app\breeze_lora_server\base-only.server.json:/app/server.json:ro `
-  local/breeze-lora-server:cpu-verify-<tag>
+  local/breeze-lora-server:cpu-verify-TAG
 
 powershell -ExecutionPolicy Bypass -File scripts\smoke_breeze_base.ps1
 ```

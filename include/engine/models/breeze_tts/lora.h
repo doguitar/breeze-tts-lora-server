@@ -1,12 +1,16 @@
 #pragma once
 
 #include "engine/framework/assets/tensor_source.h"
+#include "engine/framework/core/backend_weight_store.h"
 #include "engine/framework/core/module.h"
+#include "engine/framework/modules/linear_module.h"
 
 #include <cstdint>
 #include <filesystem>
+#include <optional>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 namespace engine::models::breeze_tts {
@@ -79,6 +83,12 @@ BreezeLoraAdapterTensors load_breeze_lora_adapter(
 
 class BreezeLoraManager {
 public:
+    struct SideBranch {
+        modules::LinearWeights a;
+        modules::LinearWeights b;
+        float scale = 1.0F;
+    };
+
     void bind_target(BreezeLoraTargetBinding binding);
     void register_adapter(const std::string & model_id, BreezeLoraAdapterTensors adapter);
     void set_base_identity(std::string revision, std::unordered_map<std::string, std::string> file_hashes);
@@ -90,23 +100,48 @@ public:
     void activate_base();
     void activate_adapter(const std::string & model_id);
 
+    // Uploads the pristine base rows into the live ggml tensors once, at startup.
+    void upload_base_live_buffers();
+
+    // Base rows are immutable; activation only swaps the active A/B/scale side adapter.
+    const std::vector<float> & base_rows(ggml_tensor * live) const;
+    const std::string & active_adapter_id() const noexcept { return active_adapter_id_; }
+    const std::vector<float> & active_lora_a(const std::string & module_name) const;
+    const std::vector<float> & active_lora_b(const std::string & module_name) const;
+    const BreezeLoraAdapterTensors * active_adapter() const noexcept { return active_adapter_; }
+
+    // Executable side branches: one A/B ggml tensor pair per adapter module,
+    // created inside the Breeze weight store and addressed by name. `modules`
+    // nullopt allocates every module; otherwise only the listed ones.
+    void create_side_branch_tensors(
+        const std::string & model_id,
+        engine::core::BackendWeightStore & store,
+        const std::unordered_set<std::string> * modules = nullptr);
+    const SideBranch * side_branch(const std::string & model_id, const std::string & module_name) const;
+    const SideBranch * active_side_branch(const std::string & module_name) const;
+    const std::vector<BreezeLoraTargetBinding> & targets() const noexcept { return targets_; }
+    // Re-checks every registered adapter against the given bound targets.
+    void validate_registered_adapters(const std::unordered_set<std::string> * modules = nullptr) const;
+
 private:
     struct LiveBuffer {
         ggml_tensor * live = nullptr;
         engine::core::TensorShape shape = {};
         ggml_type type = GGML_TYPE_F32;
-        std::vector<float> staging_f32;
+        std::vector<float> base_f32;  // pristine unadapted base rows; written once at bind
         std::string debug_name;
     };
 
     void ensure_model_id_list();
-    void upload_live_buffers();
 
     std::vector<BreezeLoraTargetBinding> targets_;
     std::unordered_map<std::string, BreezeLoraAdapterTensors> adapters_;
+    std::unordered_map<std::string, std::unordered_map<std::string, SideBranch>> side_branches_;
     std::vector<std::string> model_ids_;
     std::string active_id_ = kBreezeBaseModelId;
+    std::string active_adapter_id_;
     size_t activation_count_ = 0;
+    const BreezeLoraAdapterTensors * active_adapter_ = nullptr;
     std::string configured_revision_;
     std::unordered_map<std::string, std::string> configured_file_hashes_;
     std::unordered_map<ggml_tensor *, LiveBuffer> live_buffers_;

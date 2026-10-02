@@ -6,7 +6,10 @@
 #include "engine/models/breeze_tts/tokenizer_text.h"
 #include "engine/models/breeze_tts/lora.h"
 
+#include <filesystem>
 #include <memory>
+#include <string>
+#include <utility>
 #include <vector>
 
 namespace engine::models::breeze_tts {
@@ -23,7 +26,9 @@ public:
         engine::core::ExecutionContext & execution,
         size_t graph_arena_bytes,
         size_t weight_context_bytes,
-        engine::assets::TensorStorageType storage_type);
+        engine::assets::TensorStorageType storage_type,
+        BreezeLoraManager & lora_manager,
+        const std::vector<std::pair<std::string, std::filesystem::path>> & lora_adapters = {});
     ~BreezeT5Gemma2TextEncoderRuntime();
 
     BreezeProjectedText encode(const std::vector<int32_t> & input_ids);

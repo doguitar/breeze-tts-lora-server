@@ -98,24 +98,24 @@ ServerRuntime::ServerRuntime(ServerConfig config) : config_(std::move(config)) {
     backend_config.threads = config_.threads;
     execution_ = std::make_unique<engine::core::ExecutionContext>(backend_config);
     assets_ = load_breeze_tts_assets(config_.base_model);
+    std::vector<std::pair<std::string, std::filesystem::path>> lora_adapters;
+    for (const auto & entry : config_.models) {
+        if (entry.lora.has_value()) {
+            lora_adapters.emplace_back(entry.id, *entry.lora);
+        }
+    }
     generator_ = std::make_unique<BreezeGeneratorRuntime>(
         assets_,
         *execution_,
         1024ull * 1024ull * 1024ull,
         2048ull * 1024ull * 1024ull,
-        engine::assets::TensorStorageType::Native);
+        engine::assets::TensorStorageType::Native,
+        engine::core::AttentionPreference::Auto,
+        engine::models::breeze_tts::Bf16ActivationMode::Auto,
+        std::move(lora_adapters),
+        config_.base_revision);
 
     auto & lora = generator_->lora_manager();
-    if (!config_.base_revision.empty()) {
-        lora.set_base_identity(config_.base_revision, {});
-    }
-    for (const auto & entry : config_.models) {
-        if (!entry.lora.has_value()) {
-            continue;
-        }
-        auto adapter = load_breeze_lora_adapter(*entry.lora, *assets_->weights);
-        lora.register_adapter(entry.id, std::move(adapter));
-    }
     lora.activate_base();
     activated_once_.insert(kBreezeBaseModelId);
 

@@ -16,6 +16,7 @@
 #include <sstream>
 #include <string_view>
 #include <stdexcept>
+#include <unordered_set>
 
 namespace engine::models::breeze_tts {
 namespace {
@@ -423,13 +424,23 @@ void BreezeLoraManager::bind_target(BreezeLoraTargetBinding binding) {
         live.live = binding.live;
         live.shape = binding.live_shape;
         live.type = binding.live_type;
-        live.staging_f32.assign(static_cast<size_t>(live.shape.num_elements()), 0.0F);
+        live.base_f32.assign(static_cast<size_t>(live.shape.num_elements()), 0.0F);
         live.debug_name = binding.module_name;
     } else if (live.shape.rank != binding.live_shape.rank ||
                live.shape.num_elements() != binding.live_shape.num_elements() ||
                live.type != binding.live_type) {
         throw std::runtime_error("conflicting LoRA live tensor metadata for " + binding.module_name);
     }
+    const int64_t live_rows = live.shape.at(0);
+    const int64_t live_cols = live.shape.at(1);
+    copy_rows(
+        live.base_f32,
+        live_rows,
+        live_cols,
+        binding.row_offset,
+        binding.base_f32,
+        binding.out_features,
+        binding.in_features);
     targets_.push_back(std::move(binding));
 }
 
@@ -487,12 +498,12 @@ void BreezeLoraManager::register_adapter(const std::string & model_id, BreezeLor
     ensure_model_id_list();
 }
 
-void BreezeLoraManager::upload_live_buffers() {
+void BreezeLoraManager::upload_base_live_buffers() {
     for (auto & [tensor, buffer] : live_buffers_) {
         engine::assets::set_backend_tensor_from_f32_parallel(
             buffer.live,
             buffer.debug_name,
-            buffer.staging_f32,
+            buffer.base_f32,
             buffer.shape,
             buffer.type,
             nullptr);
@@ -503,23 +514,8 @@ void BreezeLoraManager::activate_base() {
     if (active_id_ == kBreezeBaseModelId) {
         return;
     }
-    for (auto & [tensor, buffer] : live_buffers_) {
-        std::fill(buffer.staging_f32.begin(), buffer.staging_f32.end(), 0.0F);
-    }
-    for (const auto & target : targets_) {
-        auto & buffer = live_buffers_.at(target.live);
-        const int64_t live_rows = buffer.shape.at(0);
-        const int64_t live_cols = buffer.shape.at(1);
-        copy_rows(
-            buffer.staging_f32,
-            live_rows,
-            live_cols,
-            target.row_offset,
-            target.base_f32,
-            target.out_features,
-            target.in_features);
-    }
-    upload_live_buffers();
+    active_adapter_ = nullptr;
+    active_adapter_id_.clear();
     active_id_ = kBreezeBaseModelId;
     ++activation_count_;
     engine::debug::log_message(engine::debug::LogLevel::Info, "breeze_tts.lora", "activated breeze-base");
@@ -537,38 +533,120 @@ void BreezeLoraManager::activate_adapter(const std::string & model_id) {
     if (it == adapters_.end()) {
         throw std::runtime_error("unknown LoRA model id: " + model_id);
     }
-    const auto & adapter = it->second;
-    for (auto & [tensor, buffer] : live_buffers_) {
-        std::fill(buffer.staging_f32.begin(), buffer.staging_f32.end(), 0.0F);
-    }
-    for (const auto & target : targets_) {
-        const auto merged = breeze_lora_merge_weight(
-            target.base_f32,
-            adapter.lora_a.at(target.module_name),
-            adapter.lora_b.at(target.module_name),
-            adapter.scale,
-            target.out_features,
-            target.in_features,
-            kBreezeLoraRank);
-        auto & buffer = live_buffers_.at(target.live);
-        const int64_t live_rows = buffer.shape.at(0);
-        const int64_t live_cols = buffer.shape.at(1);
-        copy_rows(
-            buffer.staging_f32,
-            live_rows,
-            live_cols,
-            target.row_offset,
-            merged,
-            target.out_features,
-            target.in_features);
-    }
-    upload_live_buffers();
+    active_adapter_ = &it->second;
+    active_adapter_id_ = model_id;
     active_id_ = model_id;
     ++activation_count_;
     engine::debug::log_message(
         engine::debug::LogLevel::Info,
         "breeze_tts.lora",
         "activated adapter " + model_id);
+}
+
+const std::vector<float> & BreezeLoraManager::base_rows(ggml_tensor * live) const {
+    return live_buffers_.at(live).base_f32;
+}
+
+const std::vector<float> & BreezeLoraManager::active_lora_a(const std::string & module_name) const {
+    if (active_adapter_ == nullptr) {
+        throw std::runtime_error("no active LoRA adapter for module " + module_name);
+    }
+    return active_adapter_->lora_a.at(module_name);
+}
+
+const std::vector<float> & BreezeLoraManager::active_lora_b(const std::string & module_name) const {
+    if (active_adapter_ == nullptr) {
+        throw std::runtime_error("no active LoRA adapter for module " + module_name);
+    }
+    return active_adapter_->lora_b.at(module_name);
+}
+
+void BreezeLoraManager::validate_registered_adapters(const std::unordered_set<std::string> * modules) const {
+    for (const auto & [model_id, adapter] : adapters_) {
+        for (const auto & target : targets_) {
+            if (modules != nullptr && modules->count(target.module_name) == 0) {
+                continue;
+            }
+            const auto a = adapter.lora_a.find(target.module_name);
+            const auto b = adapter.lora_b.find(target.module_name);
+            if (a == adapter.lora_a.end() || b == adapter.lora_b.end()) {
+                throw std::runtime_error(
+                    "adapter " + model_id + " is missing required module " + target.module_name);
+            }
+            if (static_cast<int64_t>(a->second.size()) != kBreezeLoraRank * target.in_features ||
+                static_cast<int64_t>(b->second.size()) != target.out_features * kBreezeLoraRank) {
+                throw std::runtime_error("adapter shape mismatch for " + target.module_name);
+            }
+        }
+    }
+}
+
+void BreezeLoraManager::create_side_branch_tensors(
+    const std::string & model_id,
+    engine::core::BackendWeightStore & store,
+    const std::unordered_set<std::string> * modules) {
+    const auto adapter_it = adapters_.find(model_id);
+    if (adapter_it == adapters_.end()) {
+        throw std::runtime_error("unknown LoRA model id: " + model_id);
+    }
+    const auto & adapter = adapter_it->second;
+    if (targets_.empty()) {
+        throw std::runtime_error("Breeze LoRA targets must be bound before side branch creation");
+    }
+    auto & branches = side_branches_[model_id];
+    for (const auto & [module, a_values] : adapter.lora_a) {
+        if (modules != nullptr && modules->count(module) == 0) {
+            continue;
+        }
+        const auto b_it = adapter.lora_b.find(module);
+        if (b_it == adapter.lora_b.end()) {
+            throw std::runtime_error("adapter is missing an A/B pair for " + module);
+        }
+        const auto target_it = std::find_if(
+            targets_.begin(),
+            targets_.end(),
+            [&](const BreezeLoraTargetBinding & target) { return target.module_name == module; });
+        if (target_it == targets_.end()) {
+            throw std::runtime_error("adapter targets unbound module: " + module);
+        }
+        const int64_t in_features = target_it->in_features;
+        const int64_t out_features = target_it->out_features;
+        if (static_cast<int64_t>(a_values.size()) != kBreezeLoraRank * in_features ||
+            static_cast<int64_t>(b_it->second.size()) != out_features * kBreezeLoraRank) {
+            throw std::runtime_error("adapter shape mismatch for " + module);
+        }
+        SideBranch branch;
+        branch.scale = adapter.scale;
+        branch.a = modules::LinearWeights{
+            store.make_f32(
+                   engine::core::TensorShape::from_dims({kBreezeLoraRank, in_features}),
+                   std::vector<float>(a_values)),
+            std::nullopt};
+        branch.b = modules::LinearWeights{
+            store.make_f32(
+                   engine::core::TensorShape::from_dims({out_features, kBreezeLoraRank}),
+                   std::vector<float>(b_it->second)),
+            std::nullopt};
+        branches.emplace(module, std::move(branch));
+    }
+}
+
+const BreezeLoraManager::SideBranch * BreezeLoraManager::side_branch(
+    const std::string & model_id,
+    const std::string & module_name) const {
+    const auto adapter_it = side_branches_.find(model_id);
+    if (adapter_it == side_branches_.end()) {
+        return nullptr;
+    }
+    const auto branch_it = adapter_it->second.find(module_name);
+    return branch_it == adapter_it->second.end() ? nullptr : &branch_it->second;
+}
+
+const BreezeLoraManager::SideBranch * BreezeLoraManager::active_side_branch(const std::string & module_name) const {
+    if (active_adapter_id_.empty()) {
+        return nullptr;
+    }
+    return side_branch(active_adapter_id_, module_name);
 }
 
 }  // namespace engine::models::breeze_tts

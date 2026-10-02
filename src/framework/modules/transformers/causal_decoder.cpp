@@ -7,6 +7,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <functional>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -245,6 +246,29 @@ DecoderHiddenBatchedStaticCacheOutputs DecoderHiddenModule::build_static_cache_t
     };
 }
 
+core::TensorValue build_lm_head_linear(
+    const CausalDecoderConfig & config,
+    core::ModuleBuildContext & ctx,
+    const core::TensorValue & input,
+    const LinearWeights & weights) {
+    if (config.lm_head_linear) {
+        return config.lm_head_linear(
+            ctx,
+            input,
+            weights,
+            config.stack.hidden_size,
+            config.logits_size,
+            config.lm_head_precision);
+    }
+    return LinearModule({
+               config.stack.hidden_size,
+               config.logits_size,
+               config.use_lm_head_bias,
+               config.lm_head_precision,
+           })
+        .build(ctx, input, weights);
+}
+
 CausalDecoderModule::CausalDecoderModule(CausalDecoderConfig config)
     : config_(std::move(config)) {
     validate_config(config_);
@@ -281,13 +305,7 @@ CausalDecoderOutputs CausalDecoderModule::build(
             logits_input.shape,
             *config_.lm_head_input_type);
     }
-    const auto logits = LinearModule({
-                            config_.stack.hidden_size,
-                            config_.logits_size,
-                            config_.use_lm_head_bias,
-                            config_.lm_head_precision,
-                        })
-                            .build(ctx, logits_input, weights.lm_head);
+    const auto logits = build_lm_head_linear(config_, ctx, logits_input, weights.lm_head);
     return {std::move(hidden_out.sequence), hidden_out.hidden, logits, std::move(hidden_out.state)};
 }
 
@@ -328,13 +346,7 @@ CausalDecoderStaticCacheOutputs CausalDecoderModule::build_static_cache_tail(
             logits_input.shape,
             *config_.lm_head_input_type);
     }
-    const auto logits = LinearModule({
-                            config_.stack.hidden_size,
-                            config_.logits_size,
-                            config_.use_lm_head_bias,
-                            config_.lm_head_precision,
-                        })
-                            .build(ctx, logits_input, weights.lm_head);
+    const auto logits = build_lm_head_linear(config_, ctx, logits_input, weights.lm_head);
     return {
         std::move(hidden_out.sequence),
         hidden_out.hidden,
@@ -378,13 +390,7 @@ CausalDecoderBatchedStaticCacheOutputs CausalDecoderModule::build_static_cache_t
             logits_input.shape,
             *config_.lm_head_input_type);
     }
-    const auto logits = LinearModule({
-                            config_.stack.hidden_size,
-                            config_.logits_size,
-                            config_.use_lm_head_bias,
-                            config_.lm_head_precision,
-                        })
-                            .build(ctx, logits_input, weights.lm_head);
+    const auto logits = build_lm_head_linear(config_, ctx, logits_input, weights.lm_head);
     return {
         std::move(hidden_out.sequence),
         hidden_out.hidden,

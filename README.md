@@ -3,9 +3,10 @@
 OpenAI-compatible HTTP server for **Breeze TTS 2** with **LoRA adapter hot-swap**.
 
 One resident Breeze GGUF base model serves many named voices. Each Instavar-format
-adapter directory is exposed as an OpenAI `model` id, and the server switches
-adapter weights when the requested id changes. Training and adapter export stay in
-Python; this repository only **serves** adapters.
+adapter directory is exposed as an OpenAI `model` id, and the server rebinds a
+per-adapter low-rank side path when the requested id changes — the resident base
+weights are never rewritten. Training and adapter export stay in Python; this
+repository only **serves** adapters.
 
 This project is a focused fork of [`0xShug0/audio.cpp`](https://github.com/0xShug0/audio.cpp)
 that keeps the upstream GGUF runtime, CUDA/CPU backends and HTTP stack, and adds a
@@ -31,30 +32,44 @@ Read this before deploying.
 | `POST /v1/audio/speech` | Implemented — complete `audio/wav` responses only |
 | Bounded FIFO queue with `503 queue_full` | Implemented — one inference worker, `max_queue_depth` bound |
 | Adapter selection by OpenAI `model` id | Implemented — re-selecting the active id is a no-op |
-| Resident base with a **non-destructive side-adapter** path | **Not implemented — see the deviation note below** |
+| Resident base with a **non-destructive side-adapter** path | Implemented — see the side-adapter note below |
 
-### Deviation from the original design
+### Resident base and the side-adapter path
 
-The design this fork was built against called for an *immutable resident base* plus a
-per-forward low-rank side path, so that switching adapters would never rewrite base
-weights (`y = W·x + scale·B·(A·x)` evaluated as extra graph nodes).
+The base GGUF stays resident and immutable. Each adapter is stored as its own
+low-rank `A`/`B` pair in the Breeze weight store, and switching adapters changes
+only which pair the per-forward graph binds:
 
-**What ships today is merge-and-upload hot-swap, not that.** On each adapter switch,
-`BreezeLoraManager::activate_adapter()` merges `W + scale·B·A` on the host and
-re-uploads the full dense weight tensor into the resident ggml tensor
-(`src/models/breeze_tts/lora.cpp`). `activate_base()` likewise re-uploads the base
-rows. Consequences:
+- Adapted projections compute `y = W·x + scale·B·(A·x)` as extra graph nodes;
+  the resident base tensors are never rewritten.
+- `BreezeLoraManager::activate_adapter()` / `activate_base()` only change the
+  active id and side-branch selection. They do not merge weights or re-upload
+  dense tensors, so switch cost does not scale with adapter-covered weight bytes.
+- Base rows are captured once at bind time (`upload_base_live_buffers()`) and
+  `base_rows()` exposes them for inspection; `activate_*` does not touch them.
 
-- Switching adapters **does** rewrite the live base weight buffers; the base is not
-  immutable across a switch.
-- Switch cost scales with total adapter-covered weight bytes, not with rank.
-- Correctness still holds because activation and inference share a single worker
-  thread, so no request observes partially updated buffers — but the memory/immutability
-  guarantee of the original design is **not** met.
+Coverage for this invariant:
 
-The `breeze_lora_linear_forward()` helper (the true side-path math, `W·x + scale·B·(A·x)`)
-exists and is unit-tested, but it is **only used by tests**; it is not wired into the
-ggml graph. See [Moving to a true side-adapter path](#moving-to-a-true-side-adapter-path).
+- `tests/unittests/test_breeze_lora_side_adapter.cpp` — real ggml graph
+  proof that the enabled path equals `base(x) + scale·B(A(x))` and the disabled
+  path equals `base(x)` exactly.
+- `tests/unittests/test_breeze_lora_activation.cpp` — drives
+  `breeze-base → adapter-a → adapter-b → adapter-a → breeze-base` through a real
+  bound backend tensor and asserts the resident base bytes are unchanged after
+  every switch, with reselect as a no-op.
+- `breeze_lora_linear_forward()` (host-side reference implementation of the same
+  math) remains unit-tested in `tests/unittests/test_breeze_lora_math.cpp`.
+- `tests/unittests/test_decoder_packed_hook.cpp` — builds a `PackedGateUp` decoder
+  layer with the side-adapter hook installed and asserts the hook path produces the
+  same result as the packed path. This covers the interaction between the hook and
+  the packed-gate/up MLP layout: the hook splits the packed tensor, so the
+  single-tensor fused swiglu kernel cannot be used and the split path is taken.
+  Before that split was handled, a CPU speech request crashed with SIGSEGV during
+  decoder graph build (`ggml_glu_impl` on a null tensor); CUDA was unaffected.
+
+The disabled/base path is exact: a null adapter context returns the plain
+`LinearModule` result, so `breeze-base` output is byte-identical to an
+unadapted projection.
 
 ---
 
@@ -247,7 +262,8 @@ Every speech job logs exactly one line. **Request text is never logged.**
 
 - `first_load=true` on the first live activation of that id in the process.
   `breeze-base` is activated at startup, so its first request is not a first load.
-- `load_ms` is the adapter/base switch time, `0.0` when the id is already active.
+- `load_ms` is the adapter/base switch time; switching only rebinds side-adapter
+  buffers, so it is `0.0` in practice and when the id is already active.
 - Failures log the same fields with `status=error`.
 
 Logging is on by default to stdout; `--log-file <path>` appends to a file instead.
@@ -266,20 +282,46 @@ Logging is on by default to stdout; `--log-file <path>` appends to a file instea
 `DOCKER_EXIT=0` in the log/marker means the build (and, for CPU, the unit tests)
 succeeded. On Windows, `.devops/verify_cpu_docker.ps1` is the equivalent harness.
 
+These scripts — and the CI workflows — build and run exactly the three binaries
+listed in `verify_docker.sh`: `breeze_lora_math_test`, `breeze_lora_manifest_test`,
+`breeze_lora_server_config_test`. The activation, side-adapter and packed-hook tests
+are **not** in that set; the native command below builds and runs all six, and needs
+`-DENGINE_BUILD_MODEL_TESTS=ON` for the packed-hook test.
+
+The CUDA compile outlives a single shell invocation, so
+`.devops/build_cuda_detached.sh <tag>` launches it with `nohup` and writes
+`.build/cuda-<tag>.log` plus a `.build/cuda-<tag>.exit` marker holding
+`DOCKER_EXIT`. `.build/` is gitignored local build state.
+
 ### Unit tests
 
 | Binary | Coverage |
 |---|---|
 | `breeze_lora_math_test` | Side-path math `W·x + scale·B·(A·x)`, disabled path equals `W·x`, merge equivalence |
 | `breeze_lora_manifest_test` | Manifest schema/variant/rank validation and adapter checksums |
+| `breeze_lora_activation_test` | `breeze-base → adapter-a → adapter-b → adapter-a → breeze-base` activation state, no-op reselect, resident base rows unchanged |
+| `breeze_lora_side_adapter_test` | Real ggml graph: enabled path equals `base(x) + scale·B(A(x))`, disabled path equals `base(x)` |
 | `breeze_lora_server_config_test` | Config parsing, path resolution, required-pair rules, duplicate id rejection |
+| `decoder_packed_hook_test` | `PackedGateUp` MLP with the side-adapter hook installed builds and matches the packed path |
+
+The `decoder_packed_hook_test` (like the pre-existing `decoder_packed_projection_test`)
+is registered under `ENGINE_BUILD_MODEL_TESTS`, so configure with
+`-DENGINE_BUILD_MODEL_TESTS=ON` to build it.
 
 ### Native build
 
 ```bash
-cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DENGINE_ENABLE_CUDA=OFF -DENGINE_BUILD_TESTS=ON
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release \
+  -DENGINE_ENABLE_CUDA=OFF -DENGINE_BUILD_TESTS=ON -DENGINE_BUILD_MODEL_TESTS=ON
 cmake --build build --parallel --target breeze_lora_server \
-  breeze_lora_math_test breeze_lora_manifest_test breeze_lora_server_config_test
+  breeze_lora_math_test breeze_lora_manifest_test breeze_lora_activation_test \
+  breeze_lora_side_adapter_test breeze_lora_server_config_test decoder_packed_hook_test
+
+# Run them (each prints "<name>: ok" on success).
+for t in breeze_lora_math_test breeze_lora_manifest_test breeze_lora_activation_test \
+         breeze_lora_side_adapter_test breeze_lora_server_config_test decoder_packed_hook_test; do
+  ./build/bin/$t || exit 1
+done
 ```
 
 ### Smoke test
@@ -308,21 +350,25 @@ via `workflow_dispatch`. The CUDA architecture list defaults to `80;86;89;90`.
 
 ---
 
-## Moving to a true side-adapter path
+## Side-adapter binding
 
-The remaining work to reach the original design is localized:
+The side path is wired through the decoder build hooks rather than through
+`LinearModule` itself:
 
-1. Give `LinearWeights` (`include/engine/framework/modules/linear_module.h`) optional
-   `lora_a` / `lora_b` / `lora_scale` tensors.
-2. In `LinearModule::build` (`src/framework/modules/linear_module.cpp`), when those are
-   present emit `ggml_mul_mat(a, x)` → `ggml_mul_mat(b, ·)` → `ggml_scale` → `ggml_add`
-   against the existing base `ggml_mul_mat` result.
-3. Bind A/B into the decoder's per-request graph build so switching an adapter changes
-   only the bound buffers, leaving base weights untouched.
+1. `DecoderStackConfig::side_adapter_layer_linear` and
+   `DecoderLayerConfig::side_adapter_linear` (`include/engine/framework/modules/transformers/decoder.h`)
+   let the owning model override how a projection is built.
+2. `build_adapter_linear()` (`src/models/breeze_tts/lora_linear.cpp`) emits
+   `base(x)` and, when an adapter is active,
+   `ggml_mul_mat(a, x)` → `ggml_mul_mat(b, ·)` → `ggml_scale` → `ggml_add`.
+3. `BreezeGeneratorRuntime` installs those hooks for the backbone and depth
+   stacks and resolves the active adapter's `A`/`B` per module name at graph build
+   time, so switching an adapter changes only the bound buffers.
 
-Packed targets (`qkv_weight`, `gate_up_proj`) already slice per-projection rows via
-`SliceModule`, so per-projection side paths fit the existing structure. The merge path
-in `lora.cpp` should then be deleted rather than kept alongside.
+Packed targets (`qkv_weight`, `gate_up_proj`) are sliced per projection before the
+hook runs, so each projection gets its own side path. Because that split replaces
+the single packed tensor, the packed-gate/up fused swiglu kernel is not used on the
+hook path; the split swiglu path is used instead, which produces the same result.
 
 ---
 

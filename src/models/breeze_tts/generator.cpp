@@ -1,5 +1,6 @@
 #include "engine/models/breeze_tts/generator.h"
 #include "engine/models/breeze_tts/lora.h"
+#include "engine/models/breeze_tts/lora_linear.h"
 
 #include "engine/framework/core/backend.h"
 #include "engine/framework/core/backend_weight_store.h"
@@ -508,7 +509,6 @@ std::shared_ptr<const BreezeWeights> load_weights(
     out->depth_heads = out->store->make_f32(
         core::TensorShape::from_dims({config.num_codebooks - 1, config.vocab_size, config.depth_hidden_size}),
         transposed_depth_heads);
-    out->store->upload();
     return out;
 }
 
@@ -681,13 +681,18 @@ private:
         const modules::LinearWeights & weights,
         const char * label) {
         auto input = core::make_tensor(ctx, GGML_TYPE_F32, core::TensorShape::from_dims({batch, in_features}));
-        auto output = modules::LinearModule({in_features, out_features, false})
-                          .build(ctx, input, weights)
-                          .tensor;
+        auto output = build_adapter_linear(
+            ctx,
+            input,
+            weights,
+            in_features,
+            out_features,
+            GGML_PREC_DEFAULT,
+            BreezeLoraLinearScope::resolve("depth_decoder.model.inputs_embeds_projector"));
         auto * graph = ggml_new_graph_custom(ctx_.get(), 32768, false);
-        ggml_set_output(output);
-        ggml_build_forward_expand(graph, output);
-        return {input.tensor, output, graph, batch * in_features, batch * out_features, label};
+        ggml_set_output(output.tensor);
+        ggml_build_forward_expand(graph, output.tensor);
+        return {input.tensor, output.tensor, graph, batch * in_features, batch * out_features, label};
     }
 
     Graph build_head_graph(
@@ -825,6 +830,23 @@ void bind_layer_lora_targets(
         0);
 }
 
+BreezeLoraManager make_lora_manager_with_adapters(
+    const std::shared_ptr<const BreezeTTSAssets> & assets,
+    const std::vector<std::pair<std::string, std::filesystem::path>> & lora_adapters,
+    const std::string & base_revision) {
+    BreezeLoraManager manager;
+    if (assets == nullptr || assets->weights == nullptr) {
+        return manager;
+    }
+    if (!base_revision.empty()) {
+        manager.set_base_identity(base_revision, {});
+    }
+    for (const auto & [model_id, adapter_path] : lora_adapters) {
+        manager.register_adapter(model_id, load_breeze_lora_adapter(adapter_path, *assets->weights));
+    }
+    return manager;
+}
+
 struct BreezeGeneratorRuntime::Impl {
     Impl(
         std::shared_ptr<const BreezeTTSAssets> assets,
@@ -833,11 +855,21 @@ struct BreezeGeneratorRuntime::Impl {
         size_t weight_context_bytes,
         assets::TensorStorageType storage_type,
         core::AttentionPreference attention_preference = core::AttentionPreference::Auto,
-        Bf16ActivationMode bf16_activations = Bf16ActivationMode::Auto)
+        Bf16ActivationMode bf16_activations = Bf16ActivationMode::Auto,
+        std::vector<std::pair<std::string, std::filesystem::path>> lora_adapters = {},
+        std::string base_revision = {})
         : assets(std::move(assets)),
           execution(execution),
           tokenizer(this->assets),
-          text_encoder(this->assets, execution, graph_arena_bytes, weight_context_bytes, storage_type),
+          lora_manager_(make_lora_manager_with_adapters(this->assets, lora_adapters, base_revision)),
+          text_encoder(
+              this->assets,
+              execution,
+              graph_arena_bytes,
+              weight_context_bytes,
+              storage_type,
+              lora_manager_,
+              lora_adapters),
           sampling_policy(sampling::resolve_torch_cuda_sampling_policy(
               execution.backend_type(),
               execution.config().device,
@@ -860,7 +892,95 @@ struct BreezeGeneratorRuntime::Impl {
             config, execution.backend_type(), graph_arena_bytes, allow_backbone_flash, bf16_reference);
         depth_runtime_config = depth_config(
             config, execution.backend_type(), graph_arena_bytes, allow_depth_flash, bf16_reference);
-        weights = load_weights(*this->assets, execution, weight_context_bytes, storage_type, backbone_runtime_config);
+        const auto install_side_adapter = [this](modules::DecoderStackConfig & stack, const char * prefix) {
+            stack.side_adapter_layer_linear =
+                [this, prefix](int64_t layer) {
+                    return std::function<core::TensorValue(
+                        core::ModuleBuildContext & ctx,
+                        const std::string & module_name,
+                        const core::TensorValue & input,
+                        const modules::LinearWeights & weights,
+                        int64_t in_features,
+                        int64_t out_features,
+                        ggml_prec precision)>(
+                        [this, prefix, layer](
+                            core::ModuleBuildContext & ctx,
+                            const std::string & module_name,
+                            const core::TensorValue & input,
+                            const modules::LinearWeights & weights,
+                            int64_t in_features,
+                            int64_t out_features,
+                            ggml_prec precision) {
+                            return build_adapter_linear(
+                                ctx,
+                                input,
+                                weights,
+                                in_features,
+                                out_features,
+                                precision,
+                                resolve_active_side_adapter(
+                                    ctx,
+                                    std::string(prefix) + "." + std::to_string(layer) + "." + module_name));
+                        });
+                };
+        };
+        install_side_adapter(backbone_runtime_config.decoder.stack, "backbone_model.layers");
+        install_side_adapter(depth_runtime_config.decoder.stack, "depth_decoder.model.layers");
+        const auto install_lm_head_adapter = [this](modules::CausalDecoderRuntimeConfig & runtime_config) {
+            runtime_config.decoder.lm_head_linear =
+                [this](
+                    core::ModuleBuildContext & ctx,
+                    const core::TensorValue & input,
+                    const modules::LinearWeights & weights,
+                    int64_t in_features,
+                    int64_t out_features,
+                    ggml_prec precision) {
+                    return build_adapter_linear(
+                        ctx,
+                        input,
+                        weights,
+                        in_features,
+                        out_features,
+                        precision,
+                        resolve_active_side_adapter(ctx, "lm_head"));
+                };
+        };
+        install_lm_head_adapter(backbone_runtime_config);
+        install_lm_head_adapter(depth_runtime_config);
+        weights = load_weights(
+            *this->assets,
+            execution,
+            weight_context_bytes,
+            storage_type,
+            backbone_runtime_config);
+        bind_lora_targets();
+        std::unordered_set<std::string> generator_modules;
+        for (const auto & target : lora_manager_.targets()) {
+            if (target.module_name != "text_encoder_proj") {
+                generator_modules.insert(target.module_name);
+            }
+        }
+        lora_manager_.validate_registered_adapters(&generator_modules);
+        for (const auto & [model_id, adapter_path] : lora_adapters) {
+            lora_manager_.create_side_branch_tensors(model_id, *weights->store, &generator_modules);
+        }
+        weights->store->upload();
+        lora_manager_.upload_base_live_buffers();
+        lora_manager_.activate_base();
+        side_adapter_scope_ = std::make_unique<BreezeLoraLinearScope>(
+            [](void * user_data, const std::string & module_name) -> BreezeLoraLinearContext * {
+                auto * self = static_cast<Impl *>(user_data);
+                const auto * branch = self->lora_manager_.active_side_branch(module_name);
+                if (branch == nullptr) {
+                    return nullptr;
+                }
+                auto & slot = self->side_adapter_contexts_[module_name];
+                slot.a = branch->a;
+                slot.b = branch->b;
+                slot.scale = branch->scale;
+                return &slot;
+            },
+            this);
         backbone_cond = std::make_unique<modules::CausalDecoderRuntime>(execution, backbone_runtime_config, weights->backbone);
         backbone_uncond = std::make_unique<modules::CausalDecoderRuntime>(execution, backbone_runtime_config, weights->backbone);
         depth_pair = std::make_unique<modules::CausalDecoderRuntime>(execution, depth_runtime_config, weights->depth);
@@ -895,56 +1015,87 @@ struct BreezeGeneratorRuntime::Impl {
         depth_logits_staging_.assign(static_cast<size_t>(config.vocab_size), 0.0F);
         depth_cond_hidden_now_.assign(static_cast<size_t>(config.depth_hidden_size), 0.0F);
         depth_uncond_hidden_now_.assign(static_cast<size_t>(config.depth_hidden_size), 0.0F);
-        text_encoder.bind_lora_targets(lora_manager_);
-        {
-            const auto & source = *this->assets->weights;
-            const auto & cfg = this->assets->config;
-            for (int64_t layer = 0; layer < cfg.layers; ++layer) {
-                bind_layer_lora_targets(
-                    lora_manager_,
-                    source,
-                    weights->backbone.stack.layers[static_cast<size_t>(layer)],
-                    "backbone_model.layers." + std::to_string(layer),
-                    cfg.hidden_size,
-                    cfg.intermediate_size,
-                    cfg.heads * cfg.head_dim,
-                    cfg.kv_heads * cfg.head_dim);
-            }
-            for (int64_t layer = 0; layer < cfg.depth_layers; ++layer) {
-                bind_layer_lora_targets(
-                    lora_manager_,
-                    source,
-                    weights->depth.stack.layers[static_cast<size_t>(layer)],
-                    "depth_decoder.model.layers." + std::to_string(layer),
-                    cfg.depth_hidden_size,
-                    cfg.depth_intermediate_size,
-                    cfg.depth_heads * cfg.depth_head_dim,
-                    cfg.depth_kv_heads * cfg.depth_head_dim);
-            }
-            if (!weights->backbone.lm_head.has_value()) {
-                throw std::runtime_error("BreezeTTS LoRA requires lm_head");
-            }
-            bind_single_lora_target(
-                lora_manager_,
-                source,
-                "lm_head",
-                cfg.lm_head_size,
-                cfg.hidden_size,
-                weights->backbone.lm_head->weight.tensor,
-                weights->backbone.lm_head->weight.shape,
-                weights->backbone.lm_head->weight.type,
-                0);
-            bind_single_lora_target(
-                lora_manager_,
-                source,
-                "depth_decoder.model.inputs_embeds_projector",
-                cfg.depth_hidden_size,
-                cfg.hidden_size,
-                weights->depth_projector.weight.tensor,
-                weights->depth_projector.weight.shape,
-                weights->depth_projector.weight.type,
-                0);
+        depth_graph_arena_bytes_ = graph_arena_bytes;
+    }
+
+    void ensure_depth_projection_current() {
+        const std::string & active = lora_manager_.active_id();
+        if (depth_projection != nullptr && depth_projection_adapter_id_ == active) {
+            return;
         }
+        depth_projection = std::make_unique<BreezeDepthProjectionRuntime>(
+            execution.backend(),
+            execution.backend_type(),
+            execution.config().threads,
+            depth_graph_arena_bytes_,
+            assets->config,
+            weights->depth_projector,
+            weights->depth_heads);
+        depth_projection_adapter_id_ = active;
+    }
+
+    const BreezeLoraLinearContext * resolve_active_side_adapter(
+        core::ModuleBuildContext & ctx,
+        const std::string & module_name) {
+        const auto * branch = lora_manager_.active_side_branch(module_name);
+        if (branch == nullptr) {
+            return nullptr;
+        }
+        auto & slot = side_adapter_contexts_[module_name];
+        slot.a = branch->a;
+        slot.b = branch->b;
+        slot.scale = branch->scale;
+        return &slot;
+    }
+
+    void bind_lora_targets() {
+        const auto & source = *assets->weights;
+        const auto & cfg = assets->config;
+        for (int64_t layer = 0; layer < cfg.layers; ++layer) {
+            bind_layer_lora_targets(
+                lora_manager_,
+                source,
+                weights->backbone.stack.layers[static_cast<size_t>(layer)],
+                "backbone_model.layers." + std::to_string(layer),
+                cfg.hidden_size,
+                cfg.intermediate_size,
+                cfg.heads * cfg.head_dim,
+                cfg.kv_heads * cfg.head_dim);
+        }
+        for (int64_t layer = 0; layer < cfg.depth_layers; ++layer) {
+            bind_layer_lora_targets(
+                lora_manager_,
+                source,
+                weights->depth.stack.layers[static_cast<size_t>(layer)],
+                "depth_decoder.model.layers." + std::to_string(layer),
+                cfg.depth_hidden_size,
+                cfg.depth_intermediate_size,
+                cfg.depth_heads * cfg.depth_head_dim,
+                cfg.depth_kv_heads * cfg.depth_head_dim);
+        }
+        if (!weights->backbone.lm_head.has_value()) {
+            throw std::runtime_error("BreezeTTS LoRA requires lm_head");
+        }
+        bind_single_lora_target(
+            lora_manager_,
+            source,
+            "lm_head",
+            cfg.lm_head_size,
+            cfg.hidden_size,
+            weights->backbone.lm_head->weight.tensor,
+            weights->backbone.lm_head->weight.shape,
+            weights->backbone.lm_head->weight.type,
+            0);
+        bind_single_lora_target(
+            lora_manager_,
+            source,
+            "depth_decoder.model.inputs_embeds_projector",
+            cfg.depth_hidden_size,
+            cfg.hidden_size,
+            weights->depth_projector.weight.tensor,
+            weights->depth_projector.weight.shape,
+            weights->depth_projector.weight.type,
+            0);
     }
 
     std::vector<float> merge_prompt(const BreezePromptBranch & branch, const std::vector<int32_t> & reference_codes) {
@@ -1028,6 +1179,7 @@ struct BreezeGeneratorRuntime::Impl {
         const size_t depth_hidden_bytes = depth_hidden_size * sizeof(float);
 
         const auto project_audio_embedding_row = [&](int64_t row, float * out) {
+            ensure_depth_projection_current();
             const int64_t rows = config.num_codebooks * config.vocab_size;
             if (row < 0 || row >= rows) {
                 throw std::runtime_error("BreezeTTS embedding row is outside table");
@@ -1039,6 +1191,7 @@ struct BreezeGeneratorRuntime::Impl {
         };
 
         project_audio_embedding_row(first_token, depth_first_embed_staging_.data());
+        ensure_depth_projection_current();
         depth_projection->project_pair(
             cond_hidden.data(),
             uncond_hidden.data(),
@@ -1561,16 +1714,20 @@ struct BreezeGeneratorRuntime::Impl {
     std::shared_ptr<const BreezeTTSAssets> assets;
     core::ExecutionContext & execution;
     BreezeTextTokenizer tokenizer;
+    BreezeLoraManager lora_manager_;
+    std::unordered_map<std::string, BreezeLoraLinearContext> side_adapter_contexts_;
+    std::unique_ptr<BreezeLoraLinearScope> side_adapter_scope_;
     BreezeT5Gemma2TextEncoderRuntime text_encoder;
     sampling::TorchCudaSamplingPolicy sampling_policy;
     modules::CausalDecoderRuntimeConfig backbone_runtime_config;
     modules::CausalDecoderRuntimeConfig depth_runtime_config;
     std::shared_ptr<const BreezeWeights> weights;
-    BreezeLoraManager lora_manager_;
     std::unique_ptr<modules::CausalDecoderRuntime> backbone_cond;
     std::unique_ptr<modules::CausalDecoderRuntime> backbone_uncond;
     std::unique_ptr<modules::CausalDecoderRuntime> depth_pair;
     std::unique_ptr<BreezeDepthProjectionRuntime> depth_projection;
+    std::string depth_projection_adapter_id_;
+    size_t depth_graph_arena_bytes_ = 0;
     std::unique_ptr<BreezeSpeechEncoderRuntime> speech_encoder;
     std::unique_ptr<BreezeSpeechDecoderRuntime> speech_decoder;
     std::vector<float> depth_first_embed_staging_;
@@ -1590,7 +1747,9 @@ BreezeGeneratorRuntime::BreezeGeneratorRuntime(
     size_t weight_context_bytes,
     engine::assets::TensorStorageType storage_type,
     engine::core::AttentionPreference attention_preference,
-    Bf16ActivationMode bf16_activations)
+    Bf16ActivationMode bf16_activations,
+    std::vector<std::pair<std::string, std::filesystem::path>> lora_adapters,
+    std::string base_revision)
     : impl_(std::make_unique<Impl>(
           std::move(assets),
           execution,
@@ -1598,7 +1757,9 @@ BreezeGeneratorRuntime::BreezeGeneratorRuntime(
           weight_context_bytes,
           storage_type,
           attention_preference,
-          bf16_activations)) {}
+          bf16_activations,
+          std::move(lora_adapters),
+          std::move(base_revision))) {}
 
 BreezeGeneratorRuntime::~BreezeGeneratorRuntime() = default;
 

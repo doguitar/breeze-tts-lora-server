@@ -33,6 +33,15 @@ struct CausalDecoderConfig {
     ggml_prec lm_head_precision = GGML_PREC_DEFAULT;
     std::optional<ggml_type> lm_head_input_type;
     ggml_type static_cache_type = GGML_TYPE_F32;
+    // Optional Breeze side-adapter hook for the output projection. Null for
+    // every other model, which keeps the plain LinearModule path.
+    std::function<core::TensorValue(
+        core::ModuleBuildContext & ctx,
+        const core::TensorValue & input,
+        const LinearWeights & weights,
+        int64_t in_features,
+        int64_t out_features,
+        ggml_prec precision)> lm_head_linear;
 };
 
 struct CausalDecoderWeights {
