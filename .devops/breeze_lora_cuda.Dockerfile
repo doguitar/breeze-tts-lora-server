@@ -1,8 +1,13 @@
 # Dedicated Breeze + LoRA hot-swap server image (CUDA).
 ARG CUDA_VERSION=12.4.1
 ARG CUDA_DOCKER_ARCH=native
+# nvcc peaks at well over a gigabyte per translation unit, so an unbounded
+# `cmake --build --parallel` on a many-core host starves the container and the
+# runner with it. Cap the job count and let the caller raise it deliberately.
+ARG CUDA_BUILD_JOBS=2
 FROM nvidia/cuda:${CUDA_VERSION}-devel-ubuntu22.04 AS build
 ARG CUDA_DOCKER_ARCH
+ARG CUDA_BUILD_JOBS
 ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential cmake git python3 \
@@ -15,7 +20,7 @@ RUN cmake -S . -B build \
       -DENGINE_BUILD_TESTS=ON \
       -DAUDIOCPP_BUILD_NATIVE_MODEL_MANAGER=OFF \
       -DCMAKE_CUDA_ARCHITECTURES="${CUDA_DOCKER_ARCH}" \
- && cmake --build build --parallel --target breeze_lora_server breeze_lora_math_test breeze_lora_manifest_test breeze_lora_server_config_test
+ && cmake --build build --parallel "${CUDA_BUILD_JOBS}" --target breeze_lora_server breeze_lora_math_test breeze_lora_manifest_test breeze_lora_server_config_test
 
 FROM nvidia/cuda:${CUDA_VERSION}-runtime-ubuntu22.04
 ENV DEBIAN_FRONTEND=noninteractive

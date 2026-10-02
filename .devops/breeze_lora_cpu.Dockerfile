@@ -1,4 +1,8 @@
 FROM ubuntu:22.04 AS build
+# Cap the build job count: an unbounded `cmake --build --parallel` sizes itself
+# from the host CPU count, which on a beefy build host can exhaust container
+# memory. Override with --build-arg BUILD_JOBS=<n>.
+ARG BUILD_JOBS=4
 ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential cmake git python3 \
@@ -10,7 +14,7 @@ RUN cmake -S . -B build \
       -DENGINE_ENABLE_CUDA=OFF \
       -DENGINE_BUILD_TESTS=ON \
       -DAUDIOCPP_BUILD_NATIVE_MODEL_MANAGER=OFF \
- && cmake --build build --parallel --target breeze_lora_server breeze_lora_math_test breeze_lora_manifest_test breeze_lora_server_config_test
+ && cmake --build build --parallel "${BUILD_JOBS}" --target breeze_lora_server breeze_lora_math_test breeze_lora_manifest_test breeze_lora_server_config_test
 
 FROM ubuntu:22.04
 ENV DEBIAN_FRONTEND=noninteractive

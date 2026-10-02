@@ -99,6 +99,7 @@ jobs:
           file: .devops/breeze_lora_cuda.Dockerfile
           build-args: |
             CUDA_DOCKER_ARCH=${{ env.CUDA_ARCHES }}
+            CUDA_BUILD_JOBS=2
           tags: |
             ghcr.io/${{ github.repository }}:cuda
             ghcr.io/${{ github.repository }}:cuda-${{ steps.meta.outputs.short_sha }}
