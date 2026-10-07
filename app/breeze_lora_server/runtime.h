@@ -25,6 +25,9 @@ namespace breeze_lora_server {
 
 enum class ResponseFormat { Wav, Mp3 };
 
+inline constexpr const char * kPublicModelId = "breeze-base";
+inline constexpr const char * kBuiltInDefaultInstruction = "Speak clearly and naturally.";
+
 class ServerRuntime final : public minitts::server::IHttpHandler {
 public:
     struct ConfigOnlyInit {};
@@ -38,14 +41,15 @@ public:
     void request_shutdown();
 
 private:
-    struct ModelDefaults {
-        std::string default_instruction = "Speak clearly and naturally.";
+    struct VoiceDefaults {
+        std::string default_instruction = kBuiltInDefaultInstruction;
         std::string reference_text;
         std::optional<engine::models::breeze_tts::BreezeSpeechCodes> reference_codes;
     };
 
     struct Job {
-        std::string model;
+        // Empty => unadapted base with built-in defaults (no saved VoiceEntry).
+        std::string voice;
         std::string text;
         std::string instruction;
         std::string reference_text;
@@ -62,29 +66,35 @@ private:
         std::promise<minitts::server::HttpResponse> response;
     };
 
-    void init_model_maps();
+    void init_voice_maps();
     void start_worker();
+    std::string activation_id_for_voice(const std::string & voice_id) const;
+    std::optional<minitts::server::HttpResponse> resolve_voice_selection(
+        const std::string & model,
+        const std::optional<std::string> & voice,
+        Job & job) const;
 
     minitts::server::HttpResponse handle_health() const;
     minitts::server::HttpResponse handle_models() const;
     minitts::server::HttpResponse handle_speech(const std::string & body_text);
     minitts::server::HttpResponse handle_ui_index() const;
-    minitts::server::HttpResponse handle_ui_models() const;
-    minitts::server::HttpResponse handle_ui_model_update(
+    minitts::server::HttpResponse handle_ui_voices() const;
+    minitts::server::HttpResponse handle_ui_voice_update(
         const minitts::server::HttpRequest & request,
-        const std::string & model_id);
+        const std::string & voice_id);
     minitts::server::HttpResponse handle_ui_reference_upload(
         const minitts::server::HttpRequest & request,
-        const std::string & model_id);
+        const std::string & voice_id);
     minitts::server::HttpResponse handle_ui_speech(const minitts::server::HttpRequest & request);
     bool ui_management_enabled() const;
     minitts::server::HttpResponse enqueue_job(std::shared_ptr<Job> job);
     void worker_loop();
-    void activate_model(const std::string & model_id);
+    void activate_voice(const std::string & voice_id);
     minitts::server::HttpResponse synthesize(const Job & job);
     ServerConfig config_;
-    std::unordered_map<std::string, std::optional<std::filesystem::path>> model_paths_;
-    std::unordered_map<std::string, ModelDefaults> model_defaults_;
+    // Only voices that have a LoRA adapter path.
+    std::unordered_map<std::string, std::filesystem::path> voice_lora_paths_;
+    std::unordered_map<std::string, VoiceDefaults> voice_defaults_;
     std::unordered_set<std::string> activated_once_;
     std::unique_ptr<engine::core::ExecutionContext> execution_;
     std::shared_ptr<const engine::models::breeze_tts::BreezeTTSAssets> assets_;

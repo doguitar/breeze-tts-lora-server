@@ -2,11 +2,12 @@
 
 OpenAI-compatible HTTP server for **Breeze TTS 2** with **LoRA adapter hot-swap**.
 
-One resident Breeze GGUF base model serves many named voices. Each Instavar-format
-adapter directory is exposed as an OpenAI `model` id, and the server rebinds a
-per-adapter low-rank side path when the requested id changes — the resident base
-weights are never rewritten. Training and adapter export stay in Python; this
-repository only **serves** adapters.
+One resident Breeze GGUF base model serves many named voices. The OpenAI model
+identity is always `breeze-base`; each Instavar-format adapter or
+instruction/reference preset is a selectable `voice`, and the server rebinds a
+per-adapter low-rank side path when the requested voice changes — the resident
+base weights are never rewritten. Training and adapter export stay in Python;
+this repository only **serves** adapters.
 
 This project is a focused fork of [`0xShug0/audio.cpp`](https://github.com/0xShug0/audio.cpp)
 that keeps the upstream GGUF runtime, CUDA/CPU backends and HTTP stack, and adds a
@@ -28,10 +29,10 @@ Read this before deploying.
 | Capability | Status |
 |---|---|
 | `GET /health` | Implemented |
-| `GET /v1/models` | Implemented — lists `breeze-base` plus every configured adapter id |
-| `POST /v1/audio/speech` | Implemented — complete `audio/wav` (default) or `audio/mpeg` (`response_format=mp3`) |
+| `GET /v1/models` | Implemented — singleton `breeze-base` only |
+| `POST /v1/audio/speech` | Implemented — complete `audio/wav` (default) or `audio/mpeg` (`response_format=mp3`); `model` must be `breeze-base`, optional `voice` |
 | Bounded FIFO queue with `503 queue_full` | Implemented — one inference worker, `max_queue_depth` bound |
-| Adapter selection by OpenAI `model` id | Implemented — re-selecting the active id is a no-op |
+| Voice selection by request `voice` id | Implemented — re-selecting the active adapter/base is a no-op |
 | Resident base with a **non-destructive side-adapter** path | Implemented — see the side-adapter note below |
 
 ### Resident base and the side-adapter path
@@ -201,18 +202,18 @@ stay inside the mounted tree.
   "max_queue_depth": 8,
   "base_model": "Breeze-TTS-2-GGUF",
   "base_revision": "799624c0b4a1daa8db6d28bbd9850043c0270734",
-  "models": [
-    {
-      "id": "breeze-base",
-      "lora": null,
-      "default_instruction": "Speak clearly and naturally."
-    },
+  "voices": [
     {
       "id": "my-voice",
       "lora": "loras/my-voice",
       "default_instruction": "Speak clearly and naturally.",
       "voice_ref": "loras/my-voice/reference.wav",
       "reference_text_file": "loras/my-voice/reference.txt"
+    },
+    {
+      "id": "base-narrator",
+      "lora": null,
+      "default_instruction": "Speak clearly and naturally."
     }
   ]
 }
@@ -227,16 +228,16 @@ stay inside the mounted tree.
 | `max_queue_depth` | Max waiting requests before `503 queue_full`. Must be positive. |
 | `base_model` | Breeze TTS 2 GGUF package directory or file. Must exist. |
 | `base_revision` | Optional; checked against each adapter manifest's pinned base revision. |
-| `models[].id` | OpenAI model id. Must be unique. |
-| `models[].lora` | Adapter directory, or `null` for the unadapted base. |
-| `models[].default_instruction` | Instruction used when a request omits `instruction`. |
-| `models[].voice_ref` | Optional reference WAV that puts the id into clone mode. |
-| `models[].reference_text` / `reference_text_file` | Transcript of `voice_ref`. Exactly one. |
+| `voices[].id` | Voice id selected by the speech `voice` field. Must be unique. |
+| `voices[].lora` | Adapter directory, or `null`/omitted for an instruction/reference-only base voice. |
+| `voices[].default_instruction` | Instruction used when a request omits `instruction`. |
+| `voices[].voice_ref` | Optional reference WAV that puts the voice into clone mode. |
+| `voices[].reference_text` / `reference_text_file` | Transcript of `voice_ref`. Exactly one. |
 
 Rules enforced at startup (the process refuses to start rather than skipping a bad entry):
 
-- `models` must include `breeze-base` with `"lora": null`.
-- Model ids must be unique; adapter directories must exist.
+- `voices` must be a JSON array (empty is allowed for base-only). Legacy `models` is rejected.
+- Voice ids must be unique; non-null adapter directories must exist.
 - `voice_ref` requires exactly one of `reference_text` / `reference_text_file`.
 - Each adapter must validate: schema, variant, rank, alpha, checksums, base identity,
   and a complete A/B tensor pair for every target module.
@@ -279,8 +280,7 @@ manifest schema and a worked `adapter_config.json`.
 
 ```json
 {"object":"list","data":[
-  {"id":"breeze-base","object":"model","owned_by":"breeze-lora-server",
-   "default_instruction":"Speak clearly and naturally.","has_voice_ref":false}
+  {"id":"breeze-base","object":"model","owned_by":"breeze-lora-server"}
 ]}
 ```
 
@@ -290,21 +290,31 @@ manifest schema and a worked `adapter_config.json`.
 curl -sS http://127.0.0.1:8080/v1/audio/speech \
   -H 'Content-Type: application/json' \
   -o out.wav \
-  -d '{"model":"my-voice","input":"The train arrives in five minutes.","seed":42}'
+  -d '{"model":"breeze-base","voice":"my-voice","input":"The train arrives in five minutes.","seed":42}'
 ```
 
 ```bash
 curl -sS http://127.0.0.1:8080/v1/audio/speech \
   -H 'Content-Type: application/json' \
   -o out.mp3 \
-  -d '{"model":"my-voice","input":"The train arrives in five minutes.","seed":42,"response_format":"mp3"}'
+  -d '{"model":"breeze-base","voice":"my-voice","input":"The train arrives in five minutes.","seed":42,"response_format":"mp3"}'
+```
+
+Omit `voice` for the unadapted base:
+
+```bash
+curl -sS http://127.0.0.1:8080/v1/audio/speech \
+  -H 'Content-Type: application/json' \
+  -o out.wav \
+  -d '{"model":"breeze-base","input":"The train arrives in five minutes.","seed":42}'
 ```
 
 | Field | Meaning |
 |---|---|
-| `model` | Required. `breeze-base` or a configured adapter id. Unknown ids return `400`. |
+| `model` | Required. Must be `breeze-base`. Any other value returns `400`. |
+| `voice` | Optional configured voice id. Absent => unadapted base. Unknown ids return `400`. |
 | `input` | Required, non-empty text. |
-| `instruction` | Optional voice direction. Falls back to the model's `default_instruction`. |
+| `instruction` | Optional voice direction. Falls back to the voice's `default_instruction`, or the built-in instruction when `voice` is omitted. |
 | `voice_ref` / `reference_text` | Optional request-level clone override. Must be supplied **together**. |
 | `response_format` | Optional. Non-streaming formats: `wav` (default, `audio/wav`) or `mp3` (`audio/mpeg`). |
 | `seed`, `guidance_scale`, `temperature`, `depth_temperature`, `top_k`, `top_p`, `max_tokens` | Breeze sampling controls. |
@@ -317,7 +327,7 @@ Errors are JSON with a stable `type`:
 
 | Status | `type` | When |
 |---|---|---|
-| `400` | `invalid_request_error` | Missing/invalid fields, unknown model, unsupported format |
+| `400` | `invalid_request_error` | Missing/invalid fields, unknown model/voice, unsupported format |
 | `503` | `server_error` | `queue_full` — more than `max_queue_depth` requests waiting |
 | `500` | `server_error` | Synthesis failure |
 
@@ -326,13 +336,13 @@ Errors are JSON with a stable `type`:
 Successful speech jobs log one timing line. Request text is not included on success.
 
 ```text
-[info][breeze_lora_server] speech request model=<id> first_load=<true|false> load_ms=<ms> generate_ms=<ms> status=ok
+[info][breeze_lora_server] speech request model=breeze-base voice=<id|(none)> first_load=<true|false> load_ms=<ms> generate_ms=<ms> status=ok
 ```
 
-- `first_load=true` on the first live activation of that id in the process.
+- `first_load=true` on the first live activation of that activation id in the process.
   `breeze-base` is activated at startup, so its first request is not a first load.
 - `load_ms` is the adapter/base switch time; switching only rebinds side-adapter
-  buffers, so it is `0.0` in practice and when the id is already active.
+  buffers, so it is `0.0` in practice and when the voice is already active.
 - Synthesis failures also log the same fields with `status=error`.
 - Any HTTP response other than `200` additionally logs full request details
   (method, path, query, headers, body) plus the response status and body.
@@ -400,14 +410,16 @@ done
 With a server running:
 
 ```bash
-SMOKE_MODELS="breeze-base adapter-a adapter-b adapter-a breeze-base" \
+SMOKE_VOICES="adapter-a adapter-b" \
   ./scripts/smoke_breeze_lora_server.sh
 ```
 
-It checks `/health`, `/v1/models`, requests each id in order, verifies every default
+It checks `/health`, `/v1/models` (singleton `breeze-base`), requests a no-voice base
+WAV plus each configured voice with fixed `model=breeze-base`, verifies every default
 response is RIFF/WAVE, requests an explicit `response_format=mp3` response and checks
-`Content-Type: audio/mpeg` plus `ffprobe` `format_name=mp3`, and confirms an unknown
-model returns `400`. Requires `curl`, `python3`, and `ffprobe` (from FFmpeg).
+`Content-Type: audio/mpeg` plus `ffprobe` `format_name=mp3`, and confirms
+`model=adapter-a` and `voice=missing` each return `400`. Requires `curl`, `python3`,
+and `ffprobe` (from FFmpeg).
 
 ---
 

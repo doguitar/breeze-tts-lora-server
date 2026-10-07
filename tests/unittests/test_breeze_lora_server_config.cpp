@@ -49,36 +49,48 @@ int main() {
         "  \"backend\": \"cpu\",\n"
         "  \"max_queue_depth\": 2,\n"
         "  \"base_model\": \"base\",\n"
-        "  \"models\": [\n"
-        "    {\"id\": \"breeze-base\", \"lora\": null},\n"
-        "    {\"id\": \"adapter-a\", \"lora\": \"lora-a\", \"default_instruction\": \"Calm.\"}\n"
+        "  \"voices\": [\n"
+        "    {\"id\": \"adapter-a\", \"lora\": \"lora-a\", \"default_instruction\": \"Calm.\"},\n"
+        "    {\"id\": \"base-narrator\", \"lora\": null, \"default_instruction\": \"Narrate.\"}\n"
         "  ]\n"
         "}\n");
     auto loaded = load_config(cfg);
     require(loaded.port == 8090, "port");
     require(loaded.max_queue_depth == 2, "queue depth");
-    require(loaded.models.size() == 2, "model count");
-    require(loaded.models[1].default_instruction == "Calm.", "default instruction");
-    require(!loaded.models[1].voice_ref.has_value(), "voice_ref unset");
+    require(loaded.voices.size() == 2, "voice count");
+    require(loaded.voices[0].default_instruction == "Calm.", "default instruction");
+    require(loaded.voices[0].lora.has_value(), "lora voice has path");
+    require(!loaded.voices[1].lora.has_value(), "no-lora voice");
+    require(!loaded.voices[0].voice_ref.has_value(), "voice_ref unset");
     require(loaded.config_dir == cfg.parent_path() ||
                 std::filesystem::equivalent(loaded.config_dir, cfg.parent_path()),
             "config_dir");
-    require(loaded.models[1].lora_source == "lora-a", "lora source spelling");
+    require(loaded.voices[0].lora_source == "lora-a", "lora source spelling");
     require(loaded.base_model_source == "base", "base_model source spelling");
     require(is_loopback_host(loaded.host), "loopback host 127.0.0.1");
     require(is_loopback_host("localhost"), "loopback host localhost");
     require(is_loopback_host("::1"), "loopback host ::1");
     require(!is_loopback_host("0.0.0.0"), "non-loopback 0.0.0.0");
 
-    loaded.models[1].default_instruction = "Updated calm.";
+    loaded.voices[0].default_instruction = "Updated calm.";
     save_config_atomically(loaded);
     const auto reloaded = load_config(cfg);
-    require(reloaded.models[1].default_instruction == "Updated calm.", "persisted instruction");
-    require(reloaded.models[1].lora_source == "lora-a", "relative lora preserved after save");
+    require(reloaded.voices[0].default_instruction == "Updated calm.", "persisted instruction");
+    require(reloaded.voices[0].lora_source == "lora-a", "relative lora preserved after save");
     require(reloaded.base_model_source == "base", "relative base_model preserved after save");
     const auto serialized = serialize_config(reloaded);
+    require(serialized.find("\"voices\"") != std::string::npos, "serialize uses voices");
     require(serialized.find("\"lora\": \"lora-a\"") != std::string::npos, "serialize keeps relative lora");
     require(serialized.find("Updated calm.") != std::string::npos, "serialize includes new instruction");
+
+    write_text(cfg,
+        "{\n"
+        "  \"base_model\": \"base\",\n"
+        "  \"backend\": \"cpu\",\n"
+        "  \"voices\": []\n"
+        "}\n");
+    const auto empty_voices = load_config(cfg);
+    require(empty_voices.voices.empty(), "empty voices allowed");
 
     write_minimal_wav(root / "ref.wav");
     write_text(root / "ref.txt", "Some call me nature.\n");
@@ -86,8 +98,7 @@ int main() {
         "{\n"
         "  \"base_model\": \"base\",\n"
         "  \"backend\": \"cpu\",\n"
-        "  \"models\": [\n"
-        "    {\"id\": \"breeze-base\", \"lora\": null},\n"
+        "  \"voices\": [\n"
         "    {\n"
         "      \"id\": \"adapter-a\",\n"
         "      \"lora\": \"lora-a\",\n"
@@ -98,14 +109,14 @@ int main() {
         "  ]\n"
         "}\n");
     const auto with_voice = load_config(cfg);
-    require(with_voice.models[1].voice_ref.has_value(), "voice_ref set");
-    require(with_voice.models[1].voice_ref->filename() == "ref.wav", "relative voice_ref resolved");
-    require(std::filesystem::equivalent(*with_voice.models[1].voice_ref, root / "ref.wav"), "voice_ref path");
-    require(with_voice.models[1].reference_text == "Some call me nature.", "reference_text_file loaded");
-    require(with_voice.models[1].default_instruction == "Narrate calmly.", "default instruction with voice");
-    require(with_voice.models[1].voice_ref_source == "ref.wav", "voice_ref source spelling");
-    require(with_voice.models[1].reference_text_file_source.has_value(), "reference_text_file source kept");
-    require(*with_voice.models[1].reference_text_file_source == "ref.txt", "reference_text_file spelling");
+    require(with_voice.voices[0].voice_ref.has_value(), "voice_ref set");
+    require(with_voice.voices[0].voice_ref->filename() == "ref.wav", "relative voice_ref resolved");
+    require(std::filesystem::equivalent(*with_voice.voices[0].voice_ref, root / "ref.wav"), "voice_ref path");
+    require(with_voice.voices[0].reference_text == "Some call me nature.", "reference_text_file loaded");
+    require(with_voice.voices[0].default_instruction == "Narrate calmly.", "default instruction with voice");
+    require(with_voice.voices[0].voice_ref_source == "ref.wav", "voice_ref source spelling");
+    require(with_voice.voices[0].reference_text_file_source.has_value(), "reference_text_file source kept");
+    require(*with_voice.voices[0].reference_text_file_source == "ref.txt", "reference_text_file spelling");
     const auto voice_serialized = serialize_config(with_voice);
     require(voice_serialized.find("\"reference_text_file\": \"ref.txt\"") != std::string::npos,
             "serialize emits reference_text_file when that was the source");
@@ -116,8 +127,7 @@ int main() {
         "{\n"
         "  \"base_model\": \"base\",\n"
         "  \"backend\": \"cpu\",\n"
-        "  \"models\": [\n"
-        "    {\"id\": \"breeze-base\", \"lora\": null},\n"
+        "  \"voices\": [\n"
         "    {\"id\": \"adapter-a\", \"lora\": \"lora-a\", \"voice_ref\": \"ref.wav\"}\n"
         "  ]\n"
         "}\n");
@@ -127,8 +137,7 @@ int main() {
         "{\n"
         "  \"base_model\": \"base\",\n"
         "  \"backend\": \"cpu\",\n"
-        "  \"models\": [\n"
-        "    {\"id\": \"breeze-base\", \"lora\": null},\n"
+        "  \"voices\": [\n"
         "    {\"id\": \"adapter-a\", \"lora\": \"lora-a\", \"reference_text\": \"hi\"}\n"
         "  ]\n"
         "}\n");
@@ -139,14 +148,14 @@ int main() {
         "  \"base_model\": \"base\",\n"
         "  \"models\": [{\"id\": \"adapter-a\", \"lora\": \"lora-a\"}]\n"
         "}\n");
-    rejects([&] { load_config(cfg); }, "missing breeze-base accepted");
+    rejects([&] { load_config(cfg); }, "legacy models schema accepted");
 
     write_text(cfg,
         "{\n"
         "  \"base_model\": \"base\",\n"
-        "  \"models\": [\n"
-        "    {\"id\": \"breeze-base\", \"lora\": null},\n"
-        "    {\"id\": \"breeze-base\", \"lora\": null}\n"
+        "  \"voices\": [\n"
+        "    {\"id\": \"adapter-a\", \"lora\": \"lora-a\"},\n"
+        "    {\"id\": \"adapter-a\", \"lora\": \"lora-a\"}\n"
         "  ]\n"
         "}\n");
     rejects([&] { load_config(cfg); }, "duplicate ids accepted");
@@ -155,23 +164,21 @@ int main() {
         "{\n"
         "  \"base_model\": \"base\",\n"
         "  \"backend\": \"cpu\",\n"
-        "  \"models\": [\n"
-        "    {\"id\": \"breeze-base\", \"lora\": null},\n"
+        "  \"voices\": [\n"
         "    {\"id\": \"bad/id\", \"lora\": \"lora-a\"}\n"
         "  ]\n"
         "}\n");
-    rejects([&] { load_config(cfg); }, "model id with slash accepted");
+    rejects([&] { load_config(cfg); }, "voice id with slash accepted");
 
     write_text(cfg,
         "{\n"
         "  \"base_model\": \"base\",\n"
         "  \"backend\": \"cpu\",\n"
-        "  \"models\": [\n"
-        "    {\"id\": \"breeze-base\", \"lora\": null},\n"
+        "  \"voices\": [\n"
         "    {\"id\": \"bad..id\", \"lora\": \"lora-a\"}\n"
         "  ]\n"
         "}\n");
-    rejects([&] { load_config(cfg); }, "model id with .. accepted");
+    rejects([&] { load_config(cfg); }, "voice id with .. accepted");
 
     std::cout << "test_breeze_lora_server_config: ok\n";
     return 0;

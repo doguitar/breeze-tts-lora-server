@@ -8,9 +8,9 @@
 
 namespace breeze_lora_server {
 
-struct ModelEntry {
+struct VoiceEntry {
     std::string id;
-    std::optional<std::filesystem::path> lora;  // nullopt => breeze-base
+    std::optional<std::filesystem::path> lora;  // nullopt => instruction/reference-only base voice
     // Original JSON spelling for lora when set; empty when lora is null.
     std::string lora_source;
     std::string default_instruction = "Speak clearly and naturally.";
@@ -36,7 +36,7 @@ struct ServerConfig {
     std::string base_revision;
     std::filesystem::path config_path;  // absolute path of loaded server.json
     std::filesystem::path config_dir;   // parent of the loaded server.json
-    std::vector<ModelEntry> models;
+    std::vector<VoiceEntry> voices;
 };
 
 ServerConfig load_config(const std::filesystem::path & path);

@@ -3,8 +3,9 @@
 Dedicated OpenAI-compatible Breeze TTS 2 server with Instavar LoRA hot-swap.
 
 This repository **serves** adapters. It does **not** train them. Training and
-export stay in Python; the C++ binary loads a resident Breeze GGUF base and
-switches Instavar-format LoRA adapters by OpenAI `model` id.
+export stay in Python; the C++ binary loads a resident Breeze GGUF base exposed
+as the fixed OpenAI model `breeze-base`, and selects Instavar LoRA / instruction
+presets through the request `voice` field.
 
 ## Creating a LoRA for this server
 
@@ -103,7 +104,7 @@ Fine-tunes and LoRAs are Derivative Models under that agreement. Research /
 non-commercial use only unless you obtain a separate commercial license from
 BreezeBlue / RESONIA.
 
-### 4. Point the server at your adapters
+### 4. Point the server at your voices
 
 Example `server.json`:
 
@@ -117,24 +118,24 @@ Example `server.json`:
   "max_queue_depth": 8,
   "base_model": "/models/Breeze-TTS-2-GGUF",
   "base_revision": "799624c0b4a1daa8db6d28bbd9850043c0270734",
-  "models": [
-    {
-      "id": "breeze-base",
-      "lora": null,
-      "default_instruction": "Speak clearly and naturally."
-    },
+  "voices": [
     {
       "id": "my-voice",
       "lora": "/loras/my-voice",
       "default_instruction": "Speak clearly and naturally.",
       "voice_ref": "/loras/my-voice/reference.wav",
       "reference_text_file": "/loras/my-voice/reference.txt"
+    },
+    {
+      "id": "base-narrator",
+      "lora": null,
+      "default_instruction": "Speak clearly and naturally."
     }
   ]
 }
 ```
 
-Per-model optional fields:
+Per-voice optional fields:
 
 | Field | Role |
 |------|------|
@@ -145,13 +146,16 @@ Per-model optional fields:
 
 Rules:
 
-- `breeze-base` with `"lora": null` is required (unadapted base).
-- Each adapter id must be unique; each `lora` path must be a directory that
-  contains a valid Instavar package.
+- `voices` is a JSON array (may be empty for base-only deployments). The legacy
+  top-level `models` key is rejected.
+- A voice may omit `lora` or set `"lora": null` for an instruction/reference-only
+  base voice. A non-null `lora` must be a directory that contains a valid
+  Instavar package.
+- Each voice id must be unique and safe (no `/`, `\`, or `..`).
 - If `voice_ref` is set, you must also set exactly one of `reference_text` or
   `reference_text_file`. Startup fails if the pair is incomplete or the files
   are missing.
-- When a model has `voice_ref`, speech requests for that id automatically use
+- When a voice has `voice_ref`, speech requests for that voice automatically use
   Breeze clone mode with the packaged reference. Request-level `voice_ref` +
   `reference_text` override the configured default.
 - Config paths (`lora`, `voice_ref`, `reference_text_file`, `base_model`) are
@@ -179,23 +183,31 @@ Bind `host` to `127.0.0.1`, `localhost`, or `::1` to enable WebUI management
 (instruction/reference saves and uploads). Non-loopback binds still serve the
 audition page and synthesis, but reject management writes with `403`.
 
-Select the adapter with the OpenAI `model` field:
+`model` must be `breeze-base`. Select a configured voice with the optional
+`voice` field:
 
 ```bash
 curl -sS http://127.0.0.1:8080/v1/audio/speech \
   -H 'Content-Type: application/json' \
   -o out.wav \
-  -d '{"model":"my-voice","input":"The train arrives in five minutes.","seed":42}'
+  -d '{"model":"breeze-base","voice":"my-voice","input":"The train arrives in five minutes.","seed":42}'
 ```
 
 ```bash
 curl -sS http://127.0.0.1:8080/v1/audio/speech \
   -H 'Content-Type: application/json' \
   -o out.mp3 \
-  -d '{"model":"my-voice","input":"The train arrives in five minutes.","seed":42,"response_format":"mp3"}'
+  -d '{"model":"breeze-base","voice":"my-voice","input":"The train arrives in five minutes.","seed":42,"response_format":"mp3"}'
 ```
 
-Use `"model":"breeze-base"` for the unadapted path.
+Omit `voice` for the unadapted base (built-in instruction, no saved reference):
+
+```bash
+curl -sS http://127.0.0.1:8080/v1/audio/speech \
+  -H 'Content-Type: application/json' \
+  -o out.wav \
+  -d '{"model":"breeze-base","input":"The train arrives in five minutes.","seed":42}'
+```
 
 Accepted non-streaming `response_format` values: `wav` (default, returns
 `audio/wav`) and `mp3` (returns `audio/mpeg`). `stream` / `stream_format` and any
@@ -204,16 +216,18 @@ other `response_format` are rejected with `400`.
 ## Endpoints
 
 - `GET /health`
-- `GET /v1/models`
-- `POST /v1/audio/speech` (complete `audio/wav` by default, or `audio/mpeg` with `response_format=mp3`)
+- `GET /v1/models` — singleton `{ id: "breeze-base", object: "model", owned_by: "breeze-lora-server" }`
+- `POST /v1/audio/speech` (complete `audio/wav` by default, or `audio/mpeg` with `response_format=mp3`); requires `model: "breeze-base"` and accepts optional `voice`
 - `GET /` — embedded WebUI (audition + management when loopback-bound)
-- `GET /ui/models` — `{ management_enabled, models: [{ id, default_instruction, has_voice_ref, reference_text }] }`
-- `PUT /ui/models/<id>` — update `default_instruction` / clear or edit reference transcript (loopback only)
-- `POST /ui/models/<id>/reference` — multipart `reference_audio` + `reference_text` (+ optional `default_instruction`); writes `webui-references/<id>.wav` (loopback only)
+- `GET /ui/voices` — `{ management_enabled, voices: [{ id, default_instruction, has_voice_ref, reference_text }] }`
+- `PUT /ui/voices/<id>` — update `default_instruction` / clear or edit reference transcript (loopback only)
+- `POST /ui/voices/<id>/reference` — multipart `reference_audio` + `reference_text` (+ optional `default_instruction`); writes `webui-references/<id>.wav` (loopback only)
 - `POST /ui/audio/speech` — browser synthesis (JSON or multipart); forces WAV for multipart; request-level instruction/reference override saved defaults without persisting
 
-Select adapters with the OpenAI `model` field. `breeze-base` is the unadapted base.
-Management endpoints require a writable `server.json` (and `webui-references/` under the config directory for uploads).
+The OpenAI model identity is always `breeze-base`. Configured adapters and
+instruction/reference presets are selected with `voice`. Management endpoints
+require a writable `server.json` (and `webui-references/` under the config
+directory for uploads).
 
 ## Request logging
 
@@ -224,13 +238,14 @@ included on success). Logging is enabled by default to stdout; pass
 Example:
 
 ```text
-[info] [breeze_lora_server] speech request model=<id> first_load=<true|false> load_ms=<ms> generate_ms=<ms> status=ok
+[info] [breeze_lora_server] speech request model=breeze-base voice=<id|(none)> first_load=<true|false> load_ms=<ms> generate_ms=<ms> status=ok
 ```
 
-- `first_load=true` on the first live activation of that model id in the process
-  (`breeze-base` is activated at startup, so its first request is not a first load).
+- `first_load=true` on the first live activation of that activation id in the
+  process (`breeze-base` is activated at startup, so its first request is not a
+  first load).
 - `load_ms` is the adapter/base switch time; switching only rebinds side-adapter
-  buffers, so this is normally `0.0`, and it is `0.0` when the requested model is
+  buffers, so this is normally `0.0`, and it is `0.0` when the requested voice is
   already active.
 - Synthesis failures also emit `status=error` with the same timing fields.
 - Any HTTP response other than `200` additionally logs full request details

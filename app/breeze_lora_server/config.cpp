@@ -30,9 +30,9 @@ std::filesystem::path resolve_path(const std::filesystem::path & config_path, co
     return (config_path.parent_path() / path).lexically_normal();
 }
 
-void validate_model_id(const std::string & id) {
+void validate_voice_id(const std::string & id) {
     if (id.find('/') != std::string::npos || id.find('\\') != std::string::npos || id.find("..") != std::string::npos) {
-        throw std::runtime_error("model id must not contain '/', '\\', or '..': " + id);
+        throw std::runtime_error("voice id must not contain '/', '\\', or '..': " + id);
     }
 }
 
@@ -46,7 +46,7 @@ std::string load_reference_text(
     const bool has_file = text_file != nullptr && !text_file->is_null();
     if (has_inline && has_file) {
         throw std::runtime_error(
-            "model entry may set only one of reference_text or reference_text_file");
+            "voice entry may set only one of reference_text or reference_text_file");
     }
     if (has_inline) {
         const auto text = inline_text->as_string();
@@ -116,31 +116,29 @@ ServerConfig load_config(const std::filesystem::path & path) {
         throw std::runtime_error("base_model path does not exist: " + config.base_model.string());
     }
 
-    const auto * models = root.find("models");
-    if (models == nullptr || !models->is_array() || models->as_array().empty()) {
-        throw std::runtime_error("models must be a non-empty array");
+    if (root.find("models") != nullptr) {
+        throw std::runtime_error("legacy top-level \"models\" is not supported; use \"voices\"");
+    }
+    const auto * voices = root.find("voices");
+    if (voices == nullptr || !voices->is_array()) {
+        throw std::runtime_error("voices must be an array");
     }
     std::unordered_set<std::string> seen;
-    bool has_base = false;
-    for (const auto & item : models->as_array()) {
+    for (const auto & item : voices->as_array()) {
         if (!item.is_object()) {
-            throw std::runtime_error("each models entry must be an object");
+            throw std::runtime_error("each voices entry must be an object");
         }
-        ModelEntry entry;
+        VoiceEntry entry;
         entry.id = engine::io::json::require_string(item, "id");
         if (entry.id.empty()) {
-            throw std::runtime_error("model id must be non-empty");
+            throw std::runtime_error("voice id must be non-empty");
         }
-        validate_model_id(entry.id);
+        validate_voice_id(entry.id);
         if (!seen.insert(entry.id).second) {
-            throw std::runtime_error("duplicate model id: " + entry.id);
+            throw std::runtime_error("duplicate voice id: " + entry.id);
         }
         const auto * lora = item.find("lora");
         if (lora == nullptr || lora->is_null()) {
-            if (entry.id != "breeze-base") {
-                throw std::runtime_error("null lora entry must use id breeze-base");
-            }
-            has_base = true;
             entry.lora_source.clear();
         } else {
             entry.lora_source = lora->as_string();
@@ -152,7 +150,7 @@ ServerConfig load_config(const std::filesystem::path & path) {
         entry.default_instruction = engine::io::json::optional_string(
             item, "default_instruction", entry.default_instruction);
         if (entry.default_instruction.empty()) {
-            throw std::runtime_error("default_instruction must be non-empty for model: " + entry.id);
+            throw std::runtime_error("default_instruction must be non-empty for voice: " + entry.id);
         }
 
         const auto * voice_ref = item.find("voice_ref");
@@ -166,16 +164,13 @@ ServerConfig load_config(const std::filesystem::path & path) {
             }
             if (entry.reference_text.empty()) {
                 throw std::runtime_error(
-                    "model " + entry.id + " sets voice_ref but missing reference_text/reference_text_file");
+                    "voice " + entry.id + " sets voice_ref but missing reference_text/reference_text_file");
             }
         } else if (!entry.reference_text.empty()) {
             throw std::runtime_error(
-                "model " + entry.id + " sets reference text without voice_ref");
+                "voice " + entry.id + " sets reference text without voice_ref");
         }
-        config.models.push_back(std::move(entry));
-    }
-    if (!has_base) {
-        throw std::runtime_error("models must include breeze-base with lora: null");
+        config.voices.push_back(std::move(entry));
     }
     return config;
 }
@@ -191,9 +186,9 @@ std::string serialize_config(const ServerConfig & config) {
         << "  \"max_queue_depth\": " << config.max_queue_depth << ",\n"
         << "  \"base_model\": " << json_quote(config.base_model_source) << ",\n"
         << "  \"base_revision\": " << json_quote(config.base_revision) << ",\n"
-        << "  \"models\": [\n";
-    for (size_t i = 0; i < config.models.size(); ++i) {
-        const auto & entry = config.models[i];
+        << "  \"voices\": [\n";
+    for (size_t i = 0; i < config.voices.size(); ++i) {
+        const auto & entry = config.voices[i];
         out << "    {\n"
             << "      \"id\": " << json_quote(entry.id) << ",\n";
         if (!entry.lora.has_value()) {
@@ -215,7 +210,7 @@ std::string serialize_config(const ServerConfig & config) {
             }
         }
         out << "\n    }";
-        if (i + 1 < config.models.size()) {
+        if (i + 1 < config.voices.size()) {
             out << ',';
         }
         out << '\n';

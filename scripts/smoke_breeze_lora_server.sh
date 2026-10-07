@@ -1,23 +1,23 @@
 #!/usr/bin/env bash
 # Breeze LoRA server smoke test.
 #
-# Checks /health and /v1/models, then runs a hot-swap WAV sequence (default
-# breeze-base -> adapter-a -> adapter-b -> adapter-a -> breeze-base) and
-# verifies every response is a RIFF/WAVE file. Also requests an explicit MP3
+# Checks /health and /v1/models (singleton breeze-base), then runs a WAV
+# sequence for the unadapted base (no voice) plus each configured voice id,
+# verifying every response is a RIFF/WAVE file. Also requests an explicit MP3
 # response and validates Content-Type plus ffprobe format_name=mp3. Finishes
-# by checking that an unknown model id is rejected with 400.
+# by checking that model=adapter-a and voice=missing are rejected with 400.
 #
 # Requires: curl, python3 (or PYTHON), ffprobe (from FFmpeg).
 #
 # Usage:
 #   BASE_URL=http://127.0.0.1:8080 \
-#   SMOKE_MODELS="breeze-base adapter-a adapter-b adapter-a breeze-base" \
+#   SMOKE_VOICES="adapter-a adapter-b" \
 #     ./scripts/smoke_breeze_lora_server.sh
 #
 # Environment:
 #   BASE_URL        server origin (default http://127.0.0.1:8080)
 #   OUT_DIR         output directory (default /tmp/breeze-lora-smoke)
-#   SMOKE_MODELS    space-separated model ids to request in order
+#   SMOKE_VOICES    space-separated voice ids to request after the no-voice base
 #   SMOKE_TEXT      request text (default "The train arrives in five minutes.")
 #   SMOKE_SEED      request seed (default 42)
 #   SMOKE_MAX_TOKENS  request max_tokens (default 64)
@@ -39,7 +39,7 @@ fi
 
 BASE_URL="${BASE_URL:-http://127.0.0.1:8080}"
 OUT_DIR="${OUT_DIR:-/tmp/breeze-lora-smoke}"
-SMOKE_MODELS="${SMOKE_MODELS:-breeze-base adapter-a adapter-b adapter-a breeze-base}"
+SMOKE_VOICES="${SMOKE_VOICES:-adapter-a adapter-b}"
 SMOKE_TEXT="${SMOKE_TEXT:-The train arrives in five minutes.}"
 SMOKE_SEED="${SMOKE_SEED:-42}"
 SMOKE_MAX_TOKENS="${SMOKE_MAX_TOKENS:-64}"
@@ -50,19 +50,24 @@ curl -fsS "$BASE_URL/health" | tee "$OUT_DIR/health.json"
 echo
 curl -fsS "$BASE_URL/v1/models" | tee "$OUT_DIR/models.json"
 echo
+"$PYTHON" - "$OUT_DIR/models.json" <<'PY'
+import json
+import sys
+from pathlib import Path
+data = json.loads(Path(sys.argv[1]).read_text())
+ids = [item["id"] for item in data.get("data", [])]
+assert ids == ["breeze-base"], "expected singleton breeze-base, got %r" % ids
+print("models list ok:", ids)
+PY
 
-first_model=""
-i=0
-for model in $SMOKE_MODELS; do
-    if [ -z "$first_model" ]; then
-        first_model="$model"
-    fi
-    i=$((i + 1))
-    wav="$OUT_DIR/${i}-${model}.wav"
+request_wav() {
+    local label="$1"
+    local payload="$2"
+    local wav="$OUT_DIR/${label}.wav"
     curl -fsS "$BASE_URL/v1/audio/speech" \
         -H 'Content-Type: application/json' \
         -o "$wav" \
-        -d "{\"model\":\"$model\",\"input\":\"$SMOKE_TEXT\",\"seed\":$SMOKE_SEED,\"max_tokens\":$SMOKE_MAX_TOKENS}"
+        -d "$payload"
     "$PYTHON" -c '
 import sys
 from pathlib import Path
@@ -71,6 +76,17 @@ b = p.read_bytes()
 assert b[:4] == b"RIFF" and b[8:12] == b"WAVE", "%s is not RIFF/WAVE" % p
 print("%s bytes=%d" % (p.name, len(b)))
 ' "$wav"
+}
+
+i=0
+i=$((i + 1))
+request_wav "${i}-breeze-base" \
+    "{\"model\":\"breeze-base\",\"input\":\"$SMOKE_TEXT\",\"seed\":$SMOKE_SEED,\"max_tokens\":$SMOKE_MAX_TOKENS}"
+
+for voice in $SMOKE_VOICES; do
+    i=$((i + 1))
+    request_wav "${i}-${voice}" \
+        "{\"model\":\"breeze-base\",\"voice\":\"$voice\",\"input\":\"$SMOKE_TEXT\",\"seed\":$SMOKE_SEED,\"max_tokens\":$SMOKE_MAX_TOKENS}"
 done
 
 mp3="$OUT_DIR/explicit-mp3.mp3"
@@ -79,7 +95,7 @@ curl -fsS "$BASE_URL/v1/audio/speech" \
     -H 'Content-Type: application/json' \
     -D "$mp3_headers" \
     -o "$mp3" \
-    -d "{\"model\":\"$first_model\",\"input\":\"$SMOKE_TEXT\",\"seed\":$SMOKE_SEED,\"max_tokens\":$SMOKE_MAX_TOKENS,\"response_format\":\"mp3\"}"
+    -d "{\"model\":\"breeze-base\",\"input\":\"$SMOKE_TEXT\",\"seed\":$SMOKE_SEED,\"max_tokens\":$SMOKE_MAX_TOKENS,\"response_format\":\"mp3\"}"
 "$PYTHON" -c '
 import sys
 from pathlib import Path
@@ -103,18 +119,28 @@ import urllib.error
 import urllib.request
 
 base = sys.argv[1]
-req = urllib.request.Request(
-    base + "/v1/audio/speech",
-    data=json.dumps(
-        {"model": "does-not-exist", "input": "hi", "seed": 1, "max_tokens": 16}
-    ).encode(),
-    headers={"Content-Type": "application/json"},
+
+def expect_400(payload, label):
+    req = urllib.request.Request(
+        base + "/v1/audio/speech",
+        data=json.dumps(payload).encode(),
+        headers={"Content-Type": "application/json"},
+    )
+    try:
+        urllib.request.urlopen(req)
+        raise SystemExit("expected 400 for %s" % label)
+    except urllib.error.HTTPError as exc:
+        assert exc.code == 400, exc
+        body = exc.read().decode(errors="replace")
+        print("%s ->" % label, exc.code, body)
+
+expect_400(
+    {"model": "adapter-a", "input": "hi", "seed": 1, "max_tokens": 16},
+    "adapter id in model",
 )
-try:
-    urllib.request.urlopen(req)
-    raise SystemExit("expected 400 for unknown model")
-except urllib.error.HTTPError as exc:
-    assert exc.code == 400, exc
-    print("unknown model ->", exc.code)
+expect_400(
+    {"model": "breeze-base", "voice": "missing", "input": "hi", "seed": 1, "max_tokens": 16},
+    "unknown voice",
+)
 print("smoke ok")
 PY
