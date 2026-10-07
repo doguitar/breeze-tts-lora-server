@@ -2,6 +2,11 @@ name: Build CUDA image
 
 # Builds the CUDA image from .devops/breeze_lora_cuda.Dockerfile.
 #
+# Automatic builds run on relevant pushes to main; PR-branch image builds
+# require manual workflow_dispatch (select the PR head branch in "Run
+# workflow"). Maintainers can override CUDA architectures via the
+# cuda_arches dispatch input.
+#
 # The CUDA image is compiled for a configurable set of SM architectures via the
 # CUDA_DOCKER_ARCH argument (the Dockerfile's CUDA_DOCKER_ARCH build arg). The
 # default covers Ampere, Ada and Hopper so the published image runs on common
@@ -18,16 +23,6 @@ name: Build CUDA image
 on:
   push:
     branches: [main]
-    paths:
-      - "app/breeze_lora_server/**"
-      - "src/models/breeze_tts/**"
-      - "include/engine/models/breeze_tts/**"
-      - "tests/unittests/test_breeze_lora_*.cpp"
-      - "CMakeLists.txt"
-      - ".devops/breeze_lora_cuda.Dockerfile"
-      - ".dockerignore"
-      - ".github/workflows/cuda-image.yml"
-  pull_request:
     paths:
       - "app/breeze_lora_server/**"
       - "src/models/breeze_tts/**"
