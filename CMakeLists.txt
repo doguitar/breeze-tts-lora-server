@@ -2627,13 +2627,15 @@ configure_file(
 )
 
 
+add_subdirectory(external/libmp3lame EXCLUDE_FROM_ALL)
+
 add_executable(breeze_lora_server
     app/breeze_lora_server/main.cpp
     app/breeze_lora_server/config.cpp
     app/breeze_lora_server/runtime.cpp
     app/server/http.cpp
 )
-target_link_libraries(breeze_lora_server PRIVATE engine_runtime ggml Threads::Threads)
+target_link_libraries(breeze_lora_server PRIVATE engine_runtime ggml Threads::Threads audiocpp_libmp3lame)
 target_include_directories(breeze_lora_server PRIVATE
     "${CMAKE_CURRENT_SOURCE_DIR}/app/breeze_lora_server"
     "${CMAKE_CURRENT_SOURCE_DIR}/app/server")

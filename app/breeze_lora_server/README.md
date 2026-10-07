@@ -182,13 +182,24 @@ curl -sS http://127.0.0.1:8080/v1/audio/speech \
   -d '{"model":"my-voice","input":"The train arrives in five minutes.","seed":42}'
 ```
 
+```bash
+curl -sS http://127.0.0.1:8080/v1/audio/speech \
+  -H 'Content-Type: application/json' \
+  -o out.mp3 \
+  -d '{"model":"my-voice","input":"The train arrives in five minutes.","seed":42,"response_format":"mp3"}'
+```
+
 Use `"model":"breeze-base"` for the unadapted path.
+
+Accepted non-streaming `response_format` values: `wav` (default, returns
+`audio/wav`) and `mp3` (returns `audio/mpeg`). `stream` / `stream_format` and any
+other `response_format` are rejected with `400`.
 
 ## Endpoints
 
 - `GET /health`
 - `GET /v1/models`
-- `POST /v1/audio/speech` (complete WAV only)
+- `POST /v1/audio/speech` (complete `audio/wav` by default, or `audio/mpeg` with `response_format=mp3`)
 
 Select adapters with the OpenAI `model` field. `breeze-base` is the unadapted base.
 
