@@ -56,6 +56,10 @@ jobs:
   cuda:
     name: CUDA image
     runs-on: ubuntu-24.04
+    # The CUDA build compiles ggml-cuda for several SM architectures and is the
+    # longest job in CI. An explicit ceiling makes a stalled build fail as a
+    # timeout (with the diagnostics below) instead of as a runner disconnect.
+    timeout-minutes: 120
     env:
       CUDA_ARCHES: ${{ inputs.cuda_arches || '80;86;89;90' }}
     steps:
@@ -63,27 +67,39 @@ jobs:
         uses: actions/checkout@v5
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@v4
 
       - name: Log in to GHCR
         if: github.event_name != 'pull_request'
-        uses: docker/login-action@v3
+        uses: docker/login-action@v4
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Docker diagnostics
+        run: |
+          echo "== host =="
+          nproc
+          free -m | sed -n '1,2p'
+          df -h /
+          echo "== docker =="
+          docker version
+          docker buildx version
+          docker info --format 'CPUs={{.NCPU}} MemTotal={{.MemTotal}} Driver={{.Driver}}'
 
       - name: Compute image tags
         id: meta
         run: echo "short_sha=$(git rev-parse --short=12 HEAD)" >> "$GITHUB_OUTPUT"
 
       - name: Build CUDA image
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: .
           file: .devops/breeze_lora_cuda.Dockerfile
           build-args: |
             CUDA_DOCKER_ARCH=${{ env.CUDA_ARCHES }}
+            CUDA_BUILD_JOBS=2
           tags: |
             ghcr.io/${{ github.repository }}:cuda
             ghcr.io/${{ github.repository }}:cuda-${{ steps.meta.outputs.short_sha }}

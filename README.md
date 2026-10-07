@@ -124,6 +124,66 @@ docker run --rm --gpus all -p 8080:8080 \
   breeze-lora-server:cuda
 ```
 
+Prefer mounting the config inside `/models` (and passing `--config /models/server.json`) so relative `lora` / `voice_ref` / `base_model` paths resolve inside the same tree. The Unraid templates below do that.
+
+### Unraid
+
+Pre-built images are on GHCR:
+
+| Template | Image |
+|---|---|
+| CUDA | `ghcr.io/doguitar/breeze-tts-lora-server:cuda` |
+| CPU | `ghcr.io/doguitar/breeze-tts-lora-server:cpu` |
+
+XML templates live in [`.devops/unraid/`](.devops/unraid/).
+
+#### Install the template from the Unraid CLI
+
+On the Unraid server (SSH or web terminal), download a template into dockerMan's user-templates directory, then add the container from the Docker UI:
+
+```bash
+# CUDA (recommended)
+mkdir -p /boot/config/plugins/dockerMan/templates-user
+curl -fsSL -o /boot/config/plugins/dockerMan/templates-user/my-breeze-lora-server-cuda.xml \
+  https://raw.githubusercontent.com/doguitar/breeze-tts-lora-server/main/.devops/unraid/breeze-lora-server-cuda.xml
+
+# Optional: CPU template
+curl -fsSL -o /boot/config/plugins/dockerMan/templates-user/my-breeze-lora-server-cpu.xml \
+  https://raw.githubusercontent.com/doguitar/breeze-tts-lora-server/main/.devops/unraid/breeze-lora-server-cpu.xml
+```
+
+Then in the Unraid web UI:
+
+1. Put your model tree on the array (default template path: `/mnt/user/appdata/breeze-models`) with `server.json`, `Breeze-TTS-2-GGUF/`, and any `loras/` adapters. For CUDA set `"backend": "cuda"`; for CPU use `"backend": "cpu"`.
+2. **CUDA only:** install the **Nvidia Driver** plugin, reboot if prompted, and note the GPU UUID under **Plugins → Nvidia Driver**.
+3. **Docker → Add Container**. Open the template dropdown and select **breeze-lora-server-cuda** (or **-cpu**). Unraid prefixes user templates with `my-` on disk; the template `<Name>` is what appears in the UI.
+4. Set **Models** to your host path if it differs from the default. For CUDA, set **NVIDIA_VISIBLE_DEVICES** to your GPU UUID (or leave `all`).
+5. Apply / Start. Check `http://<unraid-ip>:8080/health`.
+
+The templates set `PostArgs` to `--config /models/server.json` (last `--config` wins over the image entrypoint) and, for CUDA, `ExtraParams` to `--runtime=nvidia --restart=unless-stopped` plus the usual NVIDIA env vars.
+
+#### Or run directly with `docker` on Unraid
+
+```bash
+# CUDA — replace GPU UUID from Plugins → Nvidia Driver when pinning a device
+docker run -d --name breeze-lora-server-cuda --net bridge \
+  --runtime=nvidia --restart=unless-stopped \
+  -e NVIDIA_VISIBLE_DEVICES=all \
+  -e NVIDIA_DRIVER_CAPABILITIES=all \
+  -p 8080:8080 \
+  -v /mnt/user/appdata/breeze-models:/models:ro \
+  ghcr.io/doguitar/breeze-tts-lora-server:cuda \
+  --config /models/server.json
+
+# CPU
+docker run -d --name breeze-lora-server-cpu --net bridge \
+  --restart=unless-stopped \
+  -p 8080:8080 \
+  -v /mnt/user/appdata/breeze-models:/models:ro \
+  ghcr.io/doguitar/breeze-tts-lora-server:cpu \
+  --config /models/server.json
+```
+
 ---
 
 ## Configuration
@@ -359,7 +419,11 @@ model returns `400`. Requires `curl`, `python3`, and `ffprobe` (from FFmpeg).
 | [`.github/workflows/cuda-image.yml`](.github/workflows/cuda-image.yml) | Builds the CUDA image with a configurable `CUDA_DOCKER_ARCH`, pushes `:cuda` and `:cuda-<sha>` to GHCR |
 
 Both workflows are path-filtered to the Breeze server surface and can be run manually
-via `workflow_dispatch`. The CUDA architecture list defaults to `80;86;89;90`.
+via `workflow_dispatch`. The CUDA architecture list defaults to `80;86;89;90` and is
+passed to CMake as `-DCMAKE_CUDA_ARCHITECTURES`; each entry is a bare SM number
+(`80`) or a suffixed form (`86-real`, `90-virtual`). Keeping this list explicit
+matters: without it the engine falls back to its portable default architecture list
+and compiles every `.cu` file once per architecture.
 
 ---
 

@@ -1,0 +1,20 @@
+<?xml version="1.0"?>
+<Container version="2">
+    <Name>breeze-lora-server-cpu</Name>
+    <Repository>ghcr.io/doguitar/breeze-tts-lora-server:cpu</Repository>
+    <Registry>https://github.com/doguitar/breeze-tts-lora-server/pkgs/container/breeze-tts-lora-server</Registry>
+    <Network>bridge</Network>
+    <Privileged>false</Privileged>
+    <Support>https://github.com/doguitar/breeze-tts-lora-server/issues</Support>
+    <Project>https://github.com/doguitar/breeze-tts-lora-server</Project>
+    <Overview>OpenAI-compatible HTTP server for Breeze TTS 2 with LoRA adapter hot-swap (CPU). Mount a models directory that contains server.json (backend: cpu), the Breeze-TTS-2-GGUF package, and any LoRA adapter directories. Relative paths in server.json resolve against that directory. CPU generation is slow; prefer the CUDA template for real traffic.</Overview>
+    <Category>MediaApp:Other Tools:Utilities</Category>
+    <WebUI>http://[IP]:[PORT:8080]/health</WebUI>
+    <TemplateURL>https://raw.githubusercontent.com/doguitar/breeze-tts-lora-server/main/.devops/unraid/breeze-lora-server-cpu.xml</TemplateURL>
+    <Icon>/plugins/dynamix.docker.manager/images/question.png</Icon>
+    <ExtraParams>--restart=unless-stopped</ExtraParams>
+    <PostArgs>--config /models/server.json</PostArgs>
+    <Requires>Host path must contain server.json with "backend": "cpu", plus Breeze-TTS-2-GGUF and any LoRA adapters referenced by that config.</Requires>
+    <Config Name="Host Port" Target="8080" Default="8080" Mode="tcp" Description="HTTP API port (OpenAI-compatible /v1/audio/speech)." Type="Port" Display="always" Required="true" Mask="false">8080</Config>
+    <Config Name="Models" Target="/models" Default="/mnt/user/appdata/breeze-models" Mode="ro" Description="Read-only host directory containing server.json, Breeze-TTS-2-GGUF/, and loras/. Config is loaded from /models/server.json so relative paths resolve inside this mount." Type="Path" Display="always" Required="true" Mask="false">/mnt/user/appdata/breeze-models</Config>
+</Container>
