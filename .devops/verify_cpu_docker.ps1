@@ -76,6 +76,8 @@ if ($LASTEXITCODE -ne 0) { $ErrorActionPreference = "Stop"; exit $LASTEXITCODE }
 cmd /c "docker run --rm --entrypoint /app/breeze_lora_manifest_test `"$VerifyTag`" >> `"$Log`" 2>&1"
 if ($LASTEXITCODE -ne 0) { $ErrorActionPreference = "Stop"; exit $LASTEXITCODE }
 cmd /c "docker run --rm --entrypoint /app/breeze_lora_server_config_test `"$VerifyTag`" >> `"$Log`" 2>&1"
+if ($LASTEXITCODE -ne 0) { $ErrorActionPreference = "Stop"; exit $LASTEXITCODE }
+cmd /c "docker run --rm --entrypoint /app/breeze_lora_server_ui_test `"$VerifyTag`" >> `"$Log`" 2>&1"
 $TestExit = $LASTEXITCODE
 $ErrorActionPreference = "Stop"
 if ($TestExit -ne 0) { exit $TestExit }

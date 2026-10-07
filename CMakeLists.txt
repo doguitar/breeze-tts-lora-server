@@ -2633,7 +2633,9 @@ add_executable(breeze_lora_server
     app/breeze_lora_server/main.cpp
     app/breeze_lora_server/config.cpp
     app/breeze_lora_server/runtime.cpp
+    app/breeze_lora_server/ui_assets.cpp
     app/server/http.cpp
+    app/server/multipart.cpp
 )
 target_link_libraries(breeze_lora_server PRIVATE engine_runtime ggml Threads::Threads audiocpp_libmp3lame)
 target_include_directories(breeze_lora_server PRIVATE
@@ -3061,6 +3063,26 @@ if (ENGINE_BUILD_TESTS OR ENGINE_BUILD_EXTENDED_TESTS OR ENGINE_BUILD_MODEL_TEST
             ${CMAKE_CURRENT_SOURCE_DIR}/tests/unittests
             ${CMAKE_CURRENT_SOURCE_DIR}/app/breeze_lora_server)
         add_test(NAME breeze_lora_server_config_test COMMAND breeze_lora_server_config_test)
+
+        add_executable(breeze_lora_server_ui_test
+            tests/unittests/test_breeze_lora_server_ui.cpp
+            app/breeze_lora_server/config.cpp
+            app/breeze_lora_server/runtime.cpp
+            app/breeze_lora_server/ui_assets.cpp
+            app/server/http.cpp
+            app/server/multipart.cpp)
+        target_link_libraries(breeze_lora_server_ui_test PRIVATE engine_runtime ggml Threads::Threads audiocpp_libmp3lame)
+        target_include_directories(breeze_lora_server_ui_test PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}/tests/unittests
+            ${CMAKE_CURRENT_SOURCE_DIR}/app/breeze_lora_server
+            ${CMAKE_CURRENT_SOURCE_DIR}/app/server)
+        if (WIN32)
+            target_link_libraries(breeze_lora_server_ui_test PRIVATE ws2_32)
+        endif()
+        if (ENGINE_ENABLE_OPENMP)
+            target_link_libraries(breeze_lora_server_ui_test PRIVATE OpenMP::OpenMP_CXX)
+        endif()
+        add_test(NAME breeze_lora_server_ui_test COMMAND breeze_lora_server_ui_test)
 
         add_engine_unittest(transformer_kv_ring_test tests/unittests/test_transformer_kv_ring.cpp)
         add_test(NAME transformer_kv_ring_test COMMAND transformer_kv_ring_test)

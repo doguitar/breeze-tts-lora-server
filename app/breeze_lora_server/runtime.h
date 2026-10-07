@@ -27,7 +27,11 @@ enum class ResponseFormat { Wav, Mp3 };
 
 class ServerRuntime final : public minitts::server::IHttpHandler {
 public:
+    struct ConfigOnlyInit {};
+
     explicit ServerRuntime(ServerConfig config);
+    // Skips GGUF/generator load so UI config routes can be unit-tested without model weights.
+    ServerRuntime(ServerConfig config, ConfigOnlyInit);
     ~ServerRuntime() override;
 
     minitts::server::HttpResponse handle(const minitts::server::HttpRequest & request) override;
@@ -58,9 +62,23 @@ private:
         std::promise<minitts::server::HttpResponse> response;
     };
 
+    void init_model_maps();
+    void start_worker();
+
     minitts::server::HttpResponse handle_health() const;
     minitts::server::HttpResponse handle_models() const;
     minitts::server::HttpResponse handle_speech(const std::string & body_text);
+    minitts::server::HttpResponse handle_ui_index() const;
+    minitts::server::HttpResponse handle_ui_models() const;
+    minitts::server::HttpResponse handle_ui_model_update(
+        const minitts::server::HttpRequest & request,
+        const std::string & model_id);
+    minitts::server::HttpResponse handle_ui_reference_upload(
+        const minitts::server::HttpRequest & request,
+        const std::string & model_id);
+    minitts::server::HttpResponse handle_ui_speech(const minitts::server::HttpRequest & request);
+    bool ui_management_enabled() const;
+    minitts::server::HttpResponse enqueue_job(std::shared_ptr<Job> job);
     void worker_loop();
     void activate_model(const std::string & model_id);
     minitts::server::HttpResponse synthesize(const Job & job);
@@ -72,6 +90,7 @@ private:
     std::shared_ptr<const engine::models::breeze_tts::BreezeTTSAssets> assets_;
     std::unique_ptr<engine::models::breeze_tts::BreezeGeneratorRuntime> generator_;
 
+    mutable std::mutex defaults_mutex_;
     std::mutex mutex_;
     std::condition_variable cv_;
     std::deque<std::shared_ptr<Job>> queue_;
