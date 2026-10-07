@@ -124,8 +124,8 @@ button:not(:disabled):hover { filter: brightness(1.06); }
 <main>
   <section>
     <h2>Speak</h2>
-    <label for="model">Model</label>
-    <select id="model"></select>
+    <label for="voice">Voice</label>
+    <select id="voice"></select>
     <label for="input">Input</label>
     <textarea id="input" placeholder="Text to speak"></textarea>
     <label for="instruction">Instruction</label>
@@ -142,7 +142,7 @@ button:not(:disabled):hover { filter: brightness(1.06); }
       <button id="saveBtn" type="button">Save preset</button>
       <button id="clearBtn" class="danger" type="button">Clear reference</button>
     </div>
-    <p class="hint">Unsaved WAV/transcript overrides the saved model reference. Unsaved instruction overrides the saved default. Instruction-only presets are valid.</p>
+    <p class="hint">Unsaved WAV/transcript overrides the saved voice reference. Unsaved instruction overrides the saved default. The first option synthesizes the unadapted base with no saved preset. Instruction-only voice presets are valid.</p>
     <div id="status"></div>
   </section>
   <section>
@@ -152,8 +152,10 @@ button:not(:disabled):hover { filter: brightness(1.06); }
 </main>
 <script>
 (() => {
+  const BASE_VOICE_VALUE = '';
+  const BUILTIN_INSTRUCTION = 'Speak clearly and naturally.';
   const els = {
-    model: document.getElementById('model'),
+    voice: document.getElementById('voice'),
     input: document.getElementById('input'),
     instruction: document.getElementById('instruction'),
     referenceAudio: document.getElementById('referenceAudio'),
@@ -167,7 +169,7 @@ button:not(:disabled):hover { filter: brightness(1.06); }
     refPill: document.getElementById('refPill'),
   };
 
-  let models = [];
+  let voices = [];
   let managementEnabled = false;
   const objectUrls = [];
 
@@ -186,17 +188,22 @@ button:not(:disabled):hover { filter: brightness(1.06); }
     return text || (response.status + ' ' + response.statusText);
   }
 
-  function selectedModel() {
-    return models.find((m) => m.id === els.model.value) || null;
+  function isBaseSelection() {
+    return els.voice.value === BASE_VOICE_VALUE;
   }
 
-  function updateRefPill(model) {
-    if (!model) {
+  function selectedVoice() {
+    if (isBaseSelection()) return null;
+    return voices.find((v) => v.id === els.voice.value) || null;
+  }
+
+  function updateRefPill(voice) {
+    if (!voice) {
       els.refPill.textContent = 'reference: none';
       els.refPill.className = 'pill off';
       return;
     }
-    if (model.has_voice_ref) {
+    if (voice.has_voice_ref) {
       els.refPill.textContent = 'reference: configured';
       els.refPill.className = 'pill on';
     } else {
@@ -205,48 +212,57 @@ button:not(:disabled):hover { filter: brightness(1.06); }
     }
   }
 
-  function applyModelFields(model) {
-    if (!model) return;
-    els.instruction.value = model.default_instruction || '';
-    els.referenceText.value = model.reference_text || '';
+  function applyVoiceFields(voice) {
+    if (!voice) {
+      els.instruction.value = BUILTIN_INSTRUCTION;
+      els.referenceText.value = '';
+      els.referenceAudio.value = '';
+      updateRefPill(null);
+      return;
+    }
+    els.instruction.value = voice.default_instruction || '';
+    els.referenceText.value = voice.reference_text || '';
     els.referenceAudio.value = '';
-    updateRefPill(model);
+    updateRefPill(voice);
   }
 
   function setManagementEnabled(enabled) {
     managementEnabled = !!enabled;
-    els.saveBtn.disabled = !managementEnabled;
-    els.clearBtn.disabled = !managementEnabled;
-    els.referenceAudio.disabled = !managementEnabled;
+    const canManage = managementEnabled && !isBaseSelection();
+    els.saveBtn.disabled = !canManage;
+    els.clearBtn.disabled = !canManage;
+    els.referenceAudio.disabled = !canManage;
     els.mgmtPill.textContent = managementEnabled
       ? 'management: enabled'
       : 'management: loopback only (audition still works)';
     els.mgmtPill.className = managementEnabled ? 'pill on' : 'pill off';
   }
 
-  async function loadModels() {
-    setStatus('Loading models…');
-    const response = await fetch('/ui/models');
+  async function loadVoices() {
+    setStatus('Loading voices…');
+    const response = await fetch('/ui/voices');
     if (!response.ok) throw new Error(await readError(response));
     const data = await response.json();
-    models = Array.isArray(data.models) ? data.models : [];
-    setManagementEnabled(!!data.management_enabled);
-    const previous = els.model.value;
-    els.model.innerHTML = '';
-    for (const model of models) {
+    voices = Array.isArray(data.voices) ? data.voices : [];
+    const previous = els.voice.value;
+    els.voice.innerHTML = '';
+    const baseOpt = document.createElement('option');
+    baseOpt.value = BASE_VOICE_VALUE;
+    baseOpt.textContent = 'breeze-base (no voice)';
+    els.voice.appendChild(baseOpt);
+    for (const voice of voices) {
       const opt = document.createElement('option');
-      opt.value = model.id;
-      opt.textContent = model.id;
-      els.model.appendChild(opt);
+      opt.value = voice.id;
+      opt.textContent = voice.id;
+      els.voice.appendChild(opt);
     }
-    if (models.length === 0) {
-      applyModelFields(null);
-      setStatus('No models configured', 'error');
-      return;
+    if (previous && (previous === BASE_VOICE_VALUE || voices.some((v) => v.id === previous))) {
+      els.voice.value = previous;
+    } else {
+      els.voice.value = BASE_VOICE_VALUE;
     }
-    const pick = models.find((m) => m.id === previous) || models[0];
-    els.model.value = pick.id;
-    applyModelFields(pick);
+    applyVoiceFields(selectedVoice());
+    setManagementEnabled(!!data.management_enabled);
     setStatus('Ready', 'ok');
   }
 
@@ -264,8 +280,8 @@ button:not(:disabled):hover { filter: brightness(1.06); }
 
   async function savePreset() {
     if (!managementEnabled) throw new Error('Management UI requires a loopback bind');
-    const model = selectedModel();
-    if (!model) throw new Error('Select a model');
+    const voice = selectedVoice();
+    if (!voice) throw new Error('Select a saved voice to manage');
     const instruction = els.instruction.value.trim();
     if (!instruction) throw new Error('Instruction must be non-empty');
     const wav = pickedWav();
@@ -279,12 +295,12 @@ button:not(:disabled):hover { filter: brightness(1.06); }
       form.append('reference_audio', wav, wav.name || 'reference.wav');
       form.append('reference_text', transcript);
       form.append('default_instruction', instruction);
-      response = await fetch('/ui/models/' + encodeURIComponent(model.id) + '/reference', {
+      response = await fetch('/ui/voices/' + encodeURIComponent(voice.id) + '/reference', {
         method: 'POST',
         body: form,
       });
     } else {
-      response = await fetch('/ui/models/' + encodeURIComponent(model.id), {
+      response = await fetch('/ui/voices/' + encodeURIComponent(voice.id), {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -295,18 +311,18 @@ button:not(:disabled):hover { filter: brightness(1.06); }
       });
     }
     if (!response.ok) throw new Error(await readError(response));
-    await loadModels();
+    await loadVoices();
     setStatus('Preset saved', 'ok');
   }
 
   async function clearReference() {
     if (!managementEnabled) throw new Error('Management UI requires a loopback bind');
-    const model = selectedModel();
-    if (!model) throw new Error('Select a model');
+    const voice = selectedVoice();
+    if (!voice) throw new Error('Select a saved voice to manage');
     const instruction = els.instruction.value.trim();
     if (!instruction) throw new Error('Instruction must be non-empty');
     setStatus('Clearing reference…');
-    const response = await fetch('/ui/models/' + encodeURIComponent(model.id), {
+    const response = await fetch('/ui/voices/' + encodeURIComponent(voice.id), {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -316,7 +332,7 @@ button:not(:disabled):hover { filter: brightness(1.06); }
       }),
     });
     if (!response.ok) throw new Error(await readError(response));
-    await loadModels();
+    await loadVoices();
     setStatus('Reference cleared', 'ok');
   }
 
@@ -342,8 +358,7 @@ button:not(:disabled):hover { filter: brightness(1.06); }
   }
 
   async function generate() {
-    const model = selectedModel();
-    if (!model) throw new Error('Select a model');
+    const voice = selectedVoice();
     const input = requireInput();
     const instruction = els.instruction.value.trim();
     if (!instruction) throw new Error('Instruction must be non-empty');
@@ -355,27 +370,31 @@ button:not(:disabled):hover { filter: brightness(1.06); }
     let response;
     if (wav) {
       const form = new FormData();
-      form.append('model', model.id);
+      form.append('model', 'breeze-base');
+      if (voice) form.append('voice', voice.id);
       form.append('input', input);
       form.append('instruction', instruction);
       form.append('reference_audio', wav, wav.name || 'reference.wav');
       form.append('reference_text', transcript);
       response = await fetch('/ui/audio/speech', { method: 'POST', body: form });
     } else {
+      const payload = {
+        model: 'breeze-base',
+        input,
+        instruction,
+        response_format: 'wav',
+      };
+      if (voice) payload.voice = voice.id;
       response = await fetch('/ui/audio/speech', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          model: model.id,
-          input,
-          instruction,
-          response_format: 'wav',
-        }),
+        body: JSON.stringify(payload),
       });
     }
     if (!response.ok) throw new Error(await readError(response));
     const blob = await response.blob();
-    addHistory(blob, model.id + ' · ' + new Date().toLocaleTimeString());
+    const label = voice ? voice.id : 'breeze-base';
+    addHistory(blob, label + ' · ' + new Date().toLocaleTimeString());
     setStatus('Generated', 'ok');
   }
 
@@ -395,7 +414,10 @@ button:not(:disabled):hover { filter: brightness(1.06); }
     };
   }
 
-  els.model.addEventListener('change', () => applyModelFields(selectedModel()));
+  els.voice.addEventListener('change', () => {
+    applyVoiceFields(selectedVoice());
+    setManagementEnabled(managementEnabled);
+  });
   els.generateBtn.addEventListener('click', wrap(generate));
   els.saveBtn.addEventListener('click', wrap(savePreset));
   els.clearBtn.addEventListener('click', wrap(clearReference));
@@ -403,7 +425,7 @@ button:not(:disabled):hover { filter: brightness(1.06); }
     for (const url of objectUrls) URL.revokeObjectURL(url);
   });
 
-  loadModels().catch((err) => {
+  loadVoices().catch((err) => {
     setStatus(err && err.message ? err.message : String(err), 'error');
   });
 })();

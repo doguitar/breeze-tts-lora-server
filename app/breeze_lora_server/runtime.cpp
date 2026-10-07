@@ -256,8 +256,8 @@ std::string percent_decode_path_segment(std::string_view value) {
     return out;
 }
 
-std::optional<std::string> ui_model_id_from_path(const std::string & path, bool reference_suffix) {
-    static constexpr std::string_view kPrefix = "/ui/models/";
+std::optional<std::string> ui_voice_id_from_path(const std::string & path, bool reference_suffix) {
+    static constexpr std::string_view kPrefix = "/ui/voices/";
     if (path.rfind(kPrefix.data(), 0) != 0) {
         return std::nullopt;
     }
@@ -298,14 +298,44 @@ void write_binary_file(const std::filesystem::path & path, std::string_view byte
 
 }  // namespace
 
-void ServerRuntime::init_model_maps() {
-    for (const auto & entry : config_.models) {
-        model_paths_.emplace(entry.id, entry.lora);
-        ModelDefaults defaults;
+void ServerRuntime::init_voice_maps() {
+    for (const auto & entry : config_.voices) {
+        if (entry.lora.has_value()) {
+            voice_lora_paths_.emplace(entry.id, *entry.lora);
+        }
+        VoiceDefaults defaults;
         defaults.default_instruction = entry.default_instruction;
         defaults.reference_text = entry.reference_text;
-        model_defaults_.emplace(entry.id, std::move(defaults));
+        voice_defaults_.emplace(entry.id, std::move(defaults));
     }
+}
+
+std::string ServerRuntime::activation_id_for_voice(const std::string & voice_id) const {
+    if (voice_id.empty() || !voice_lora_paths_.count(voice_id)) {
+        return kBreezeBaseModelId;
+    }
+    return voice_id;
+}
+
+std::optional<HttpResponse> ServerRuntime::resolve_voice_selection(
+    const std::string & model,
+    const std::optional<std::string> & voice,
+    Job & job) const {
+    if (model != kPublicModelId) {
+        return error_response(400, "unknown model id: " + model, "invalid_request_error");
+    }
+    if (!voice.has_value()) {
+        job.voice.clear();
+        return std::nullopt;
+    }
+    if (voice->empty()) {
+        return error_response(400, "unknown voice id: " + *voice, "invalid_request_error");
+    }
+    if (!voice_defaults_.count(*voice)) {
+        return error_response(400, "unknown voice id: " + *voice, "invalid_request_error");
+    }
+    job.voice = *voice;
+    return std::nullopt;
 }
 
 void ServerRuntime::start_worker() {
@@ -313,7 +343,7 @@ void ServerRuntime::start_worker() {
 }
 
 ServerRuntime::ServerRuntime(ServerConfig config) : config_(std::move(config)) {
-    init_model_maps();
+    init_voice_maps();
 
     engine::core::BackendConfig backend_config;
     backend_config.type = parse_backend(config_.backend);
@@ -322,7 +352,7 @@ ServerRuntime::ServerRuntime(ServerConfig config) : config_(std::move(config)) {
     execution_ = std::make_unique<engine::core::ExecutionContext>(backend_config);
     assets_ = load_breeze_tts_assets(config_.base_model);
     std::vector<std::pair<std::string, std::filesystem::path>> lora_adapters;
-    for (const auto & entry : config_.models) {
+    for (const auto & entry : config_.voices) {
         if (entry.lora.has_value()) {
             lora_adapters.emplace_back(entry.id, *entry.lora);
         }
@@ -342,8 +372,8 @@ ServerRuntime::ServerRuntime(ServerConfig config) : config_(std::move(config)) {
     lora.activate_base();
     activated_once_.insert(kBreezeBaseModelId);
 
-    for (const auto & entry : config_.models) {
-        auto & defaults = model_defaults_.at(entry.id);
+    for (const auto & entry : config_.voices) {
+        auto & defaults = voice_defaults_.at(entry.id);
         if (entry.voice_ref.has_value()) {
             const auto audio = load_voice_ref(*entry.voice_ref);
             defaults.reference_codes = generator_->encode_reference(audio);
@@ -354,7 +384,7 @@ ServerRuntime::ServerRuntime(ServerConfig config) : config_(std::move(config)) {
 }
 
 ServerRuntime::ServerRuntime(ServerConfig config, ConfigOnlyInit) : config_(std::move(config)) {
-    init_model_maps();
+    init_voice_maps();
     start_worker();
 }
 
@@ -406,19 +436,19 @@ HttpResponse ServerRuntime::handle(const HttpRequest & request) {
             response = handle_speech(request.body);
         } else if (request.method == "GET" && request.path == "/") {
             response = handle_ui_index();
-        } else if (request.method == "GET" && request.path == "/ui/models") {
-            response = handle_ui_models();
+        } else if (request.method == "GET" && request.path == "/ui/voices") {
+            response = handle_ui_voices();
         } else if (request.method == "PUT") {
-            if (const auto model_id = ui_model_id_from_path(request.path, false)) {
-                response = handle_ui_model_update(request, *model_id);
+            if (const auto voice_id = ui_voice_id_from_path(request.path, false)) {
+                response = handle_ui_voice_update(request, *voice_id);
             } else {
                 response = error_response(404, "not found", "invalid_request_error");
             }
         } else if (request.method == "POST" && request.path == "/ui/audio/speech") {
             response = handle_ui_speech(request);
         } else if (request.method == "POST") {
-            if (const auto model_id = ui_model_id_from_path(request.path, true)) {
-                response = handle_ui_reference_upload(request, *model_id);
+            if (const auto voice_id = ui_voice_id_from_path(request.path, true)) {
+                response = handle_ui_reference_upload(request, *voice_id);
             } else {
                 response = error_response(404, "not found", "invalid_request_error");
             }
@@ -438,21 +468,10 @@ HttpResponse ServerRuntime::handle_health() const {
 
 HttpResponse ServerRuntime::handle_models() const {
     std::ostringstream out;
-    out << "{\"object\":\"list\",\"data\":[";
-    bool first = true;
-    {
-        std::lock_guard<std::mutex> lock(defaults_mutex_);
-        for (const auto & entry : config_.models) {
-            if (!first) out << ',';
-            first = false;
-            out << "{\"id\":" << json_quote(entry.id)
-                << ",\"object\":\"model\",\"owned_by\":\"breeze-lora-server\""
-                << ",\"default_instruction\":" << json_quote(entry.default_instruction)
-                << ",\"has_voice_ref\":" << (entry.voice_ref.has_value() ? "true" : "false")
-                << "}";
-        }
-    }
-    out << "]}";
+    out << "{\"object\":\"list\",\"data\":["
+        << "{\"id\":" << json_quote(kPublicModelId)
+        << ",\"object\":\"model\",\"owned_by\":\"breeze-lora-server\"}"
+        << "]}";
     return json_response(out.str());
 }
 
@@ -466,14 +485,14 @@ HttpResponse ServerRuntime::handle_ui_index() const {
     return response;
 }
 
-HttpResponse ServerRuntime::handle_ui_models() const {
+HttpResponse ServerRuntime::handle_ui_voices() const {
     std::ostringstream out;
     out << "{\"management_enabled\":" << (ui_management_enabled() ? "true" : "false")
-        << ",\"models\":[";
+        << ",\"voices\":[";
     bool first = true;
     {
         std::lock_guard<std::mutex> lock(defaults_mutex_);
-        for (const auto & entry : config_.models) {
+        for (const auto & entry : config_.voices) {
             if (!first) out << ',';
             first = false;
             out << "{\"id\":" << json_quote(entry.id)
@@ -487,9 +506,9 @@ HttpResponse ServerRuntime::handle_ui_models() const {
     return json_response(out.str());
 }
 
-HttpResponse ServerRuntime::handle_ui_model_update(
+HttpResponse ServerRuntime::handle_ui_voice_update(
     const HttpRequest & request,
-    const std::string & model_id) {
+    const std::string & voice_id) {
     if (!ui_management_enabled()) {
         return error_response(403, "management UI requires a loopback bind", "invalid_request_error");
     }
@@ -524,15 +543,15 @@ HttpResponse ServerRuntime::handle_ui_model_update(
         std::lock_guard<std::mutex> lock(defaults_mutex_);
         pending = config_;
     }
-    ModelEntry * target = nullptr;
-    for (auto & entry : pending.models) {
-        if (entry.id == model_id) {
+    VoiceEntry * target = nullptr;
+    for (auto & entry : pending.voices) {
+        if (entry.id == voice_id) {
             target = &entry;
             break;
         }
     }
     if (target == nullptr) {
-        return error_response(400, "unknown model id: " + model_id, "invalid_request_error");
+        return error_response(400, "unknown voice id: " + voice_id, "invalid_request_error");
     }
 
     target->default_instruction = default_instruction;
@@ -558,25 +577,25 @@ HttpResponse ServerRuntime::handle_ui_model_update(
 
     save_config_atomically(pending);
 
-    ModelDefaults next_defaults;
+    VoiceDefaults next_defaults;
     next_defaults.default_instruction = target->default_instruction;
     next_defaults.reference_text = target->reference_text;
     {
         std::lock_guard<std::mutex> lock(defaults_mutex_);
-        const auto defaults_it = model_defaults_.find(model_id);
-        if (defaults_it != model_defaults_.end() && !clear_reference) {
+        const auto defaults_it = voice_defaults_.find(voice_id);
+        if (defaults_it != voice_defaults_.end() && !clear_reference) {
             next_defaults.reference_codes = defaults_it->second.reference_codes;
         }
         if (clear_reference) {
             next_defaults.reference_codes.reset();
         }
-        for (auto & entry : config_.models) {
-            if (entry.id == model_id) {
+        for (auto & entry : config_.voices) {
+            if (entry.id == voice_id) {
                 entry = *target;
                 break;
             }
         }
-        model_defaults_[model_id] = std::move(next_defaults);
+        voice_defaults_[voice_id] = std::move(next_defaults);
     }
 
     return json_response("{\"ok\":true}");
@@ -584,7 +603,7 @@ HttpResponse ServerRuntime::handle_ui_model_update(
 
 HttpResponse ServerRuntime::handle_ui_reference_upload(
     const HttpRequest & request,
-    const std::string & model_id) {
+    const std::string & voice_id) {
     if (!ui_management_enabled()) {
         return error_response(403, "management UI requires a loopback bind", "invalid_request_error");
     }
@@ -629,18 +648,18 @@ HttpResponse ServerRuntime::handle_ui_reference_upload(
         pending = config_;
         previous = config_;
     }
-    ModelEntry * target = nullptr;
-    for (auto & entry : pending.models) {
-        if (entry.id == model_id) {
+    VoiceEntry * target = nullptr;
+    for (auto & entry : pending.voices) {
+        if (entry.id == voice_id) {
             target = &entry;
             break;
         }
     }
     if (target == nullptr) {
-        return error_response(400, "unknown model id: " + model_id, "invalid_request_error");
+        return error_response(400, "unknown voice id: " + voice_id, "invalid_request_error");
     }
 
-    const std::string relative = "webui-references/" + model_id + ".wav";
+    const std::string relative = "webui-references/" + voice_id + ".wav";
     const auto absolute = (pending.config_dir / relative).lexically_normal();
     const auto upload_tmp = std::filesystem::path(absolute.string() + ".tmp");
     std::filesystem::create_directories(absolute.parent_path());
@@ -660,7 +679,7 @@ HttpResponse ServerRuntime::handle_ui_reference_upload(
             target->default_instruction = *instruction_override;
         }
 
-        ModelDefaults next_defaults;
+        VoiceDefaults next_defaults;
         next_defaults.default_instruction = target->default_instruction;
         next_defaults.reference_text = target->reference_text;
         if (generator_ != nullptr) {
@@ -673,13 +692,13 @@ HttpResponse ServerRuntime::handle_ui_reference_upload(
 
         {
             std::lock_guard<std::mutex> lock(defaults_mutex_);
-            for (auto & entry : config_.models) {
-                if (entry.id == model_id) {
+            for (auto & entry : config_.voices) {
+                if (entry.id == voice_id) {
                     entry = *target;
                     break;
                 }
             }
-            model_defaults_[model_id] = std::move(next_defaults);
+            voice_defaults_[voice_id] = std::move(next_defaults);
         }
     } catch (const std::exception & ex) {
         std::error_code ec;
@@ -695,11 +714,11 @@ HttpResponse ServerRuntime::handle_ui_reference_upload(
             std::lock_guard<std::mutex> lock(defaults_mutex_);
             config_ = previous;
             // Restore defaults instruction/reference text from previous config entry.
-            for (const auto & entry : previous.models) {
-                if (entry.id != model_id) {
+            for (const auto & entry : previous.voices) {
+                if (entry.id != voice_id) {
                     continue;
                 }
-                auto & defaults = model_defaults_[model_id];
+                auto & defaults = voice_defaults_[voice_id];
                 defaults.default_instruction = entry.default_instruction;
                 defaults.reference_text = entry.reference_text;
                 if (!entry.voice_ref.has_value()) {
@@ -734,28 +753,33 @@ HttpResponse ServerRuntime::handle_speech(const std::string & body_text) {
         }
     }
     const auto model = engine::io::json::require_string(body, "model");
-    if (!model_paths_.count(model)) {
-        return error_response(400, "unknown model id: " + model, "invalid_request_error");
-    }
     const auto input = engine::io::json::require_string(body, "input");
     if (input.empty()) {
         return error_response(400, "input must be non-empty", "invalid_request_error");
     }
 
-    ModelDefaults defaults_copy;
-    {
+    auto job = std::make_shared<Job>();
+    job->text = input;
+    job->response_format = parsed_format;
+
+    std::optional<std::string> voice;
+    if (const auto * voice_value = body.find("voice"); voice_value != nullptr && !voice_value->is_null()) {
+        voice = voice_value->as_string();
+    }
+    if (const auto selection_error = resolve_voice_selection(model, voice, *job)) {
+        return *selection_error;
+    }
+
+    VoiceDefaults defaults_copy;
+    defaults_copy.default_instruction = kBuiltInDefaultInstruction;
+    if (!job->voice.empty()) {
         std::lock_guard<std::mutex> lock(defaults_mutex_);
-        const auto defaults_it = model_defaults_.find(model);
-        if (defaults_it == model_defaults_.end()) {
-            return error_response(500, "missing model defaults for: " + model, "server_error");
+        const auto defaults_it = voice_defaults_.find(job->voice);
+        if (defaults_it == voice_defaults_.end()) {
+            return error_response(500, "missing voice defaults for: " + job->voice, "server_error");
         }
         defaults_copy = defaults_it->second;
     }
-
-    auto job = std::make_shared<Job>();
-    job->model = model;
-    job->text = input;
-    job->response_format = parsed_format;
 
     const bool has_top_level_instruction = body.find("instruction") != nullptr;
     job->instruction = engine::io::json::optional_string(body, "instruction", defaults_copy.default_instruction);
@@ -812,6 +836,7 @@ HttpResponse ServerRuntime::handle_ui_speech(const HttpRequest & request) {
     if (const auto boundary = extract_multipart_boundary(content_type)) {
         const auto parts = parse_multipart_body(request.body, *boundary);
         const auto * model_part = find_part(parts, "model");
+        const auto * voice_part = find_part(parts, "voice");
         const auto * input_part = find_part(parts, "input");
         const auto * instruction_part = find_part(parts, "instruction");
         const auto * audio_part = find_part(parts, "reference_audio");
@@ -821,10 +846,6 @@ HttpResponse ServerRuntime::handle_ui_speech(const HttpRequest & request) {
         }
         if (input_part == nullptr || input_part->data.empty()) {
             return error_response(400, "input must be non-empty", "invalid_request_error");
-        }
-        const auto & model = model_part->data;
-        if (!model_paths_.count(model)) {
-            return error_response(400, "unknown model id: " + model, "invalid_request_error");
         }
 
         const bool has_audio = audio_part != nullptr && !audio_part->data.empty();
@@ -836,20 +857,28 @@ HttpResponse ServerRuntime::handle_ui_speech(const HttpRequest & request) {
                 "invalid_request_error");
         }
 
-        ModelDefaults defaults_copy;
-        {
+        auto job = std::make_shared<Job>();
+        job->text = input_part->data;
+        job->response_format = ResponseFormat::Wav;
+        std::optional<std::string> voice;
+        if (voice_part != nullptr) {
+            voice = voice_part->data;
+        }
+        if (const auto selection_error = resolve_voice_selection(model_part->data, voice, *job)) {
+            return *selection_error;
+        }
+
+        VoiceDefaults defaults_copy;
+        defaults_copy.default_instruction = kBuiltInDefaultInstruction;
+        if (!job->voice.empty()) {
             std::lock_guard<std::mutex> lock(defaults_mutex_);
-            const auto defaults_it = model_defaults_.find(model);
-            if (defaults_it == model_defaults_.end()) {
-                return error_response(500, "missing model defaults for: " + model, "server_error");
+            const auto defaults_it = voice_defaults_.find(job->voice);
+            if (defaults_it == voice_defaults_.end()) {
+                return error_response(500, "missing voice defaults for: " + job->voice, "server_error");
             }
             defaults_copy = defaults_it->second;
         }
 
-        auto job = std::make_shared<Job>();
-        job->model = model;
-        job->text = input_part->data;
-        job->response_format = ResponseFormat::Wav;
         if (instruction_part != nullptr && !instruction_part->data.empty()) {
             job->instruction = instruction_part->data;
         } else {
@@ -877,12 +906,12 @@ HttpResponse ServerRuntime::handle_ui_speech(const HttpRequest & request) {
     return handle_speech(request.body);
 }
 
-void ServerRuntime::activate_model(const std::string & model_id) {
-    if (model_id == kBreezeBaseModelId) {
+void ServerRuntime::activate_voice(const std::string & voice_id) {
+    if (activation_id_for_voice(voice_id) == kBreezeBaseModelId) {
         generator_->lora_manager().activate_base();
         return;
     }
-    generator_->lora_manager().activate_adapter(model_id);
+    generator_->lora_manager().activate_adapter(voice_id);
 }
 
 HttpResponse ServerRuntime::synthesize(const Job & job) {
@@ -896,7 +925,9 @@ HttpResponse ServerRuntime::synthesize(const Job & job) {
         return out.str();
     };
 
-    const bool first_load = !activated_once_.count(job.model);
+    const std::string activation_id = activation_id_for_voice(job.voice);
+    const bool first_load = !activated_once_.count(activation_id);
+    const std::string voice_label = job.voice.empty() ? std::string("(none)") : job.voice;
     double load_ms = 0.0;
     double generate_ms = 0.0;
 
@@ -904,11 +935,11 @@ HttpResponse ServerRuntime::synthesize(const Job & job) {
         if (generator_ == nullptr) {
             throw std::runtime_error("synthesis unavailable in config-only mode");
         }
-        if (generator_->lora_manager().active_id() != job.model) {
+        if (generator_->lora_manager().active_id() != activation_id) {
             const auto load_started = clock::now();
-            activate_model(job.model);
+            activate_voice(job.voice);
             load_ms = ms_since(load_started);
-            activated_once_.insert(job.model);
+            activated_once_.insert(activation_id);
         }
         BreezeGenerationRequest request;
         request.text = job.text;
@@ -941,7 +972,8 @@ HttpResponse ServerRuntime::synthesize(const Job & job) {
         engine::debug::log_message(
             engine::debug::LogLevel::Info,
             "breeze_lora_server",
-            "speech request model=" + job.model
+            "speech request model=" + std::string(kPublicModelId)
+                + " voice=" + voice_label
                 + " first_load=" + (first_load ? "true" : "false")
                 + " load_ms=" + format_ms(load_ms)
                 + " generate_ms=" + format_ms(generate_ms)
@@ -951,7 +983,8 @@ HttpResponse ServerRuntime::synthesize(const Job & job) {
         engine::debug::log_message(
             engine::debug::LogLevel::Error,
             "breeze_lora_server",
-            "speech request model=" + job.model
+            "speech request model=" + std::string(kPublicModelId)
+                + " voice=" + voice_label
                 + " first_load=" + (first_load ? "true" : "false")
                 + " load_ms=" + format_ms(load_ms)
                 + " generate_ms=" + format_ms(generate_ms)
