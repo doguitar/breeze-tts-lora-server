@@ -29,7 +29,7 @@ Read this before deploying.
 |---|---|
 | `GET /health` | Implemented |
 | `GET /v1/models` | Implemented — lists `breeze-base` plus every configured adapter id |
-| `POST /v1/audio/speech` | Implemented — complete `audio/wav` responses only |
+| `POST /v1/audio/speech` | Implemented — complete `audio/wav` (default) or `audio/mpeg` (`response_format=mp3`) |
 | Bounded FIFO queue with `503 queue_full` | Implemented — one inference worker, `max_queue_depth` bound |
 | Adapter selection by OpenAI `model` id | Implemented — re-selecting the active id is a no-op |
 | Resident base with a **non-destructive side-adapter** path | Implemented — see the side-adapter note below |
@@ -293,16 +293,25 @@ curl -sS http://127.0.0.1:8080/v1/audio/speech \
   -d '{"model":"my-voice","input":"The train arrives in five minutes.","seed":42}'
 ```
 
+```bash
+curl -sS http://127.0.0.1:8080/v1/audio/speech \
+  -H 'Content-Type: application/json' \
+  -o out.mp3 \
+  -d '{"model":"my-voice","input":"The train arrives in five minutes.","seed":42,"response_format":"mp3"}'
+```
+
 | Field | Meaning |
 |---|---|
 | `model` | Required. `breeze-base` or a configured adapter id. Unknown ids return `400`. |
 | `input` | Required, non-empty text. |
 | `instruction` | Optional voice direction. Falls back to the model's `default_instruction`. |
 | `voice_ref` / `reference_text` | Optional request-level clone override. Must be supplied **together**. |
+| `response_format` | Optional. Non-streaming formats: `wav` (default, `audio/wav`) or `mp3` (`audio/mpeg`). |
 | `seed`, `guidance_scale`, `temperature`, `depth_temperature`, `top_k`, `top_p`, `max_tokens` | Breeze sampling controls. |
 
-Returns `audio/wav` (a complete RIFF/WAVE body). `stream`, `stream_format`, and any
-`response_format` other than `wav` are rejected with `400`.
+Returns a complete audio body: `audio/wav` (RIFF/WAVE) by default, or `audio/mpeg`
+when `response_format` is `mp3`. `stream` and `stream_format` are rejected with
+`400`. Any `response_format` other than `wav` or `mp3` is also rejected with `400`.
 
 Errors are JSON with a stable `type`:
 
@@ -314,7 +323,7 @@ Errors are JSON with a stable `type`:
 
 #### Request logging
 
-Every speech job logs exactly one line. **Request text is never logged.**
+Successful speech jobs log one timing line. Request text is not included on success.
 
 ```text
 [info][breeze_lora_server] speech request model=<id> first_load=<true|false> load_ms=<ms> generate_ms=<ms> status=ok
@@ -324,7 +333,9 @@ Every speech job logs exactly one line. **Request text is never logged.**
   `breeze-base` is activated at startup, so its first request is not a first load.
 - `load_ms` is the adapter/base switch time; switching only rebinds side-adapter
   buffers, so it is `0.0` in practice and when the id is already active.
-- Failures log the same fields with `status=error`.
+- Synthesis failures also log the same fields with `status=error`.
+- Any HTTP response other than `200` additionally logs full request details
+  (method, path, query, headers, body) plus the response status and body.
 
 Logging is on by default to stdout; `--log-file <path>` appends to a file instead.
 
@@ -393,8 +404,10 @@ SMOKE_MODELS="breeze-base adapter-a adapter-b adapter-a breeze-base" \
   ./scripts/smoke_breeze_lora_server.sh
 ```
 
-It checks `/health`, `/v1/models`, requests each id in order, verifies every response
-is RIFF/WAVE, and confirms an unknown model returns `400`.
+It checks `/health`, `/v1/models`, requests each id in order, verifies every default
+response is RIFF/WAVE, requests an explicit `response_format=mp3` response and checks
+`Content-Type: audio/mpeg` plus `ffprobe` `format_name=mp3`, and confirms an unknown
+model returns `400`. Requires `curl`, `python3`, and `ffprobe` (from FFmpeg).
 
 ---
 

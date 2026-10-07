@@ -5,12 +5,15 @@
 #include "engine/framework/io/json.h"
 #include "engine/models/breeze_tts/lora.h"
 
+#include <lame.h>
+
 #include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <iomanip>
 #include <sstream>
 #include <stdexcept>
+#include <vector>
 
 namespace breeze_lora_server {
 namespace {
@@ -81,8 +84,116 @@ std::vector<uint8_t> encode_pcm16_wav(const engine::runtime::AudioBuffer & audio
     return out;
 }
 
+std::vector<uint8_t> encode_mp3(const engine::runtime::AudioBuffer & audio) {
+    if (audio.sample_rate <= 0 || audio.channels <= 0) {
+        throw std::runtime_error("invalid audio buffer metadata");
+    }
+    if (audio.samples.size() % static_cast<size_t>(audio.channels) != 0) {
+        throw std::runtime_error("audio sample count must be divisible by channels");
+    }
+
+    std::vector<int16_t> pcm;
+    pcm.reserve(audio.samples.size());
+    for (float sample : audio.samples) {
+        sample = std::max(-1.0F, std::min(1.0F, sample));
+        pcm.push_back(static_cast<int16_t>(std::lrint(sample * 32767.0F)));
+    }
+
+    lame_t lame = lame_init();
+    if (lame == nullptr) {
+        throw std::runtime_error("lame_init failed");
+    }
+
+    const int channels = audio.channels;
+    lame_set_in_samplerate(lame, audio.sample_rate);
+    lame_set_num_channels(lame, channels);
+    lame_set_mode(lame, channels <= 1 ? MONO : STEREO);
+    lame_set_VBR(lame, vbr_off);
+    lame_set_brate(lame, 128);
+    lame_set_quality(lame, 5);
+    if (lame_init_params(lame) < 0) {
+        lame_close(lame);
+        throw std::runtime_error("lame_init_params failed");
+    }
+
+    const size_t frames = pcm.size() / static_cast<size_t>(channels);
+    // LAME recommends ~1.25 * samples + 7200 for the MP3 output buffer.
+    const size_t mp3_buf_size = static_cast<size_t>(1.25 * static_cast<double>(pcm.size())) + 7200;
+    std::vector<uint8_t> mp3_buf(mp3_buf_size);
+    std::vector<uint8_t> out;
+
+    constexpr size_t kChunkFrames = 1152;
+    size_t frame_offset = 0;
+    while (frame_offset < frames) {
+        const size_t chunk_frames = std::min(kChunkFrames, frames - frame_offset);
+        const int16_t * chunk = pcm.data() + frame_offset * static_cast<size_t>(channels);
+        const int written = (channels == 1)
+            ? lame_encode_buffer(
+                  lame,
+                  chunk,
+                  nullptr,
+                  static_cast<int>(chunk_frames),
+                  mp3_buf.data(),
+                  static_cast<int>(mp3_buf.size()))
+            : lame_encode_buffer_interleaved(
+                  lame,
+                  const_cast<int16_t *>(chunk),
+                  static_cast<int>(chunk_frames),
+                  mp3_buf.data(),
+                  static_cast<int>(mp3_buf.size()));
+        if (written < 0) {
+            lame_close(lame);
+            throw std::runtime_error("lame_encode failed");
+        }
+        out.insert(out.end(), mp3_buf.begin(), mp3_buf.begin() + written);
+        frame_offset += chunk_frames;
+    }
+
+    const int flushed = lame_encode_flush(
+        lame, mp3_buf.data(), static_cast<int>(mp3_buf.size()));
+    if (flushed < 0) {
+        lame_close(lame);
+        throw std::runtime_error("lame_encode_flush failed");
+    }
+    out.insert(out.end(), mp3_buf.begin(), mp3_buf.begin() + flushed);
+    lame_close(lame);
+    return out;
+}
+
 std::string json_quote(const std::string & value) {
     return engine::io::json::stringify_string(value);
+}
+
+void log_non_success_request(const HttpRequest & request, const HttpResponse & response) {
+    if (response.status == 200) {
+        return;
+    }
+
+    std::ostringstream headers;
+    headers << '{';
+    bool first = true;
+    for (const auto & [key, value] : request.headers) {
+        if (!first) {
+            headers << ',';
+        }
+        first = false;
+        headers << json_quote(key) << ':' << json_quote(value);
+    }
+    headers << '}';
+
+    std::ostringstream message;
+    message << "non-success response"
+            << " status=" << response.status
+            << " method=" << request.method
+            << " path=" << request.path
+            << " query=" << json_quote(request.query)
+            << " headers=" << headers.str()
+            << " body=" << json_quote(request.body)
+            << " response_body=" << json_quote(response.body);
+    engine::debug::log_message(
+        engine::debug::LogLevel::Error,
+        "breeze_lora_server",
+        message.str());
 }
 
 }  // namespace
@@ -154,20 +265,22 @@ void ServerRuntime::request_shutdown() {
 }
 
 HttpResponse ServerRuntime::handle(const HttpRequest & request) {
+    HttpResponse response;
     try {
         if (request.method == "GET" && request.path == "/health") {
-            return handle_health();
+            response = handle_health();
+        } else if (request.method == "GET" && request.path == "/v1/models") {
+            response = handle_models();
+        } else if (request.method == "POST" && request.path == "/v1/audio/speech") {
+            response = handle_speech(request.body);
+        } else {
+            response = error_response(404, "not found", "invalid_request_error");
         }
-        if (request.method == "GET" && request.path == "/v1/models") {
-            return handle_models();
-        }
-        if (request.method == "POST" && request.path == "/v1/audio/speech") {
-            return handle_speech(request.body);
-        }
-        return error_response(404, "not found", "invalid_request_error");
     } catch (const std::exception & ex) {
-        return error_response(400, ex.what(), "invalid_request_error");
+        response = error_response(400, ex.what(), "invalid_request_error");
     }
+    log_non_success_request(request, response);
+    return response;
 }
 
 HttpResponse ServerRuntime::handle_health() const {
@@ -196,9 +309,19 @@ HttpResponse ServerRuntime::handle_speech(const std::string & body_text) {
     if (body.find("stream") != nullptr || body.find("stream_format") != nullptr) {
         return error_response(400, "streaming is not supported", "invalid_request_error");
     }
-    const auto response_format = engine::io::json::optional_string(body, "response_format", "wav");
-    if (response_format != "wav") {
-        return error_response(400, "only response_format=wav is supported", "invalid_request_error");
+    ResponseFormat parsed_format = ResponseFormat::Wav;
+    if (body.find("response_format") != nullptr) {
+        const auto response_format = engine::io::json::require_string(body, "response_format");
+        if (response_format == "wav") {
+            parsed_format = ResponseFormat::Wav;
+        } else if (response_format == "mp3") {
+            parsed_format = ResponseFormat::Mp3;
+        } else {
+            return error_response(
+                400,
+                "only response_format=wav or mp3 is supported",
+                "invalid_request_error");
+        }
     }
     const auto model = engine::io::json::require_string(body, "model");
     if (!model_paths_.count(model)) {
@@ -218,6 +341,7 @@ HttpResponse ServerRuntime::handle_speech(const std::string & body_text) {
     auto job = std::make_shared<Job>();
     job->model = model;
     job->text = input;
+    job->response_format = parsed_format;
 
     const bool has_top_level_instruction = body.find("instruction") != nullptr;
     job->instruction = engine::io::json::optional_string(body, "instruction", defaults.default_instruction);
@@ -326,11 +450,17 @@ HttpResponse ServerRuntime::synthesize(const Job & job) {
         const auto generate_started = clock::now();
         const auto audio = generator_->generate(request);
         generate_ms = ms_since(generate_started);
-        const auto wav = encode_pcm16_wav(audio);
         HttpResponse response;
         response.status = 200;
-        response.content_type = "audio/wav";
-        response.body.assign(reinterpret_cast<const char *>(wav.data()), wav.size());
+        if (job.response_format == ResponseFormat::Mp3) {
+            const auto mp3 = encode_mp3(audio);
+            response.content_type = "audio/mpeg";
+            response.body.assign(reinterpret_cast<const char *>(mp3.data()), mp3.size());
+        } else {
+            const auto wav = encode_pcm16_wav(audio);
+            response.content_type = "audio/wav";
+            response.body.assign(reinterpret_cast<const char *>(wav.data()), wav.size());
+        }
         engine::debug::log_message(
             engine::debug::LogLevel::Info,
             "breeze_lora_server",

@@ -23,6 +23,8 @@
 
 namespace breeze_lora_server {
 
+enum class ResponseFormat { Wav, Mp3 };
+
 class ServerRuntime final : public minitts::server::IHttpHandler {
 public:
     explicit ServerRuntime(ServerConfig config);
@@ -45,6 +47,7 @@ private:
         std::string reference_text;
         std::optional<engine::models::breeze_tts::BreezeSpeechCodes> reference_codes;
         std::optional<engine::runtime::AudioBuffer> reference_audio;
+        ResponseFormat response_format = ResponseFormat::Wav;
         uint64_t seed = 0;
         float guidance_scale = 1.0F;
         float temperature = 0.9F;

@@ -182,20 +182,32 @@ curl -sS http://127.0.0.1:8080/v1/audio/speech \
   -d '{"model":"my-voice","input":"The train arrives in five minutes.","seed":42}'
 ```
 
+```bash
+curl -sS http://127.0.0.1:8080/v1/audio/speech \
+  -H 'Content-Type: application/json' \
+  -o out.mp3 \
+  -d '{"model":"my-voice","input":"The train arrives in five minutes.","seed":42,"response_format":"mp3"}'
+```
+
 Use `"model":"breeze-base"` for the unadapted path.
+
+Accepted non-streaming `response_format` values: `wav` (default, returns
+`audio/wav`) and `mp3` (returns `audio/mpeg`). `stream` / `stream_format` and any
+other `response_format` are rejected with `400`.
 
 ## Endpoints
 
 - `GET /health`
 - `GET /v1/models`
-- `POST /v1/audio/speech` (complete WAV only)
+- `POST /v1/audio/speech` (complete `audio/wav` by default, or `audio/mpeg` with `response_format=mp3`)
 
 Select adapters with the OpenAI `model` field. `breeze-base` is the unadapted base.
 
 ## Request logging
 
-Each `/v1/audio/speech` job logs one line (request text is never logged). Logging
-is enabled by default to stdout; pass `--log-file path` to append to a file.
+Each successful `/v1/audio/speech` job logs one timing line (request text is not
+included on success). Logging is enabled by default to stdout; pass
+`--log-file path` to append to a file.
 
 Example:
 
@@ -208,7 +220,9 @@ Example:
 - `load_ms` is the adapter/base switch time; switching only rebinds side-adapter
   buffers, so this is normally `0.0`, and it is `0.0` when the requested model is
   already active.
-- Failures use `status=error` with the same timing fields (still no request text).
+- Synthesis failures also emit `status=error` with the same timing fields.
+- Any HTTP response other than `200` additionally logs full request details
+  (method, path, query, headers, body) plus the response status and body.
 
 ## Config
 
