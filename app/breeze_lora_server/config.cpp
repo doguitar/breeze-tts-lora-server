@@ -3,7 +3,9 @@
 #include "engine/framework/io/filesystem.h"
 #include "engine/framework/io/json.h"
 
+#include <fstream>
 #include <stdexcept>
+#include <sstream>
 #include <unordered_set>
 
 namespace breeze_lora_server {
@@ -17,9 +19,16 @@ std::filesystem::path resolve_path(const std::filesystem::path & config_path, co
     return (config_path.parent_path() / path).lexically_normal();
 }
 
+void validate_model_id(const std::string & id) {
+    if (id.find('/') != std::string::npos || id.find('\\') != std::string::npos || id.find("..") != std::string::npos) {
+        throw std::runtime_error("model id must not contain '/', '\\', or '..': " + id);
+    }
+}
+
 std::string load_reference_text(
     const std::filesystem::path & config_path,
-    const engine::io::json::Value & item) {
+    const engine::io::json::Value & item,
+    std::optional<std::string> & reference_text_file_source) {
     const auto * inline_text = item.find("reference_text");
     const auto * text_file = item.find("reference_text_file");
     const bool has_inline = inline_text != nullptr && !inline_text->is_null();
@@ -33,10 +42,12 @@ std::string load_reference_text(
         if (text.empty()) {
             throw std::runtime_error("reference_text must be non-empty when set");
         }
+        reference_text_file_source.reset();
         return text;
     }
     if (has_file) {
-        const auto path = resolve_path(config_path, text_file->as_string());
+        const auto source = text_file->as_string();
+        const auto path = resolve_path(config_path, source);
         if (!engine::io::is_existing_file(path)) {
             throw std::runtime_error("reference_text_file missing: " + path.string());
         }
@@ -47,17 +58,28 @@ std::string load_reference_text(
         if (text.empty()) {
             throw std::runtime_error("reference_text_file is empty: " + path.string());
         }
+        reference_text_file_source = source;
         return text;
     }
+    reference_text_file_source.reset();
     return {};
+}
+
+std::string json_quote(const std::string & value) {
+    return engine::io::json::stringify_string(value);
 }
 
 }  // namespace
 
+bool is_loopback_host(const std::string & host) {
+    return host == "127.0.0.1" || host == "localhost" || host == "::1";
+}
+
 ServerConfig load_config(const std::filesystem::path & path) {
     const auto root = engine::io::json::parse_file(path);
     ServerConfig config;
-    config.config_dir = path.parent_path();
+    config.config_path = std::filesystem::absolute(path).lexically_normal();
+    config.config_dir = config.config_path.parent_path();
     config.host = engine::io::json::optional_string(root, "host", config.host);
     config.port = engine::io::json::optional_i32(root, "port", config.port);
     config.backend = engine::io::json::optional_string(root, "backend", config.backend);
@@ -65,7 +87,8 @@ ServerConfig load_config(const std::filesystem::path & path) {
     config.threads = engine::io::json::optional_i32(root, "threads", config.threads);
     config.max_queue_depth = engine::io::json::optional_i32(root, "max_queue_depth", config.max_queue_depth);
     config.base_revision = engine::io::json::optional_string(root, "base_revision", "");
-    config.base_model = resolve_path(path, engine::io::json::require_string(root, "base_model"));
+    config.base_model_source = engine::io::json::require_string(root, "base_model");
+    config.base_model = resolve_path(path, config.base_model_source);
     if (config.port <= 0 || config.port > 65535) {
         throw std::runtime_error("port must be in 1..65535");
     }
@@ -97,6 +120,7 @@ ServerConfig load_config(const std::filesystem::path & path) {
         if (entry.id.empty()) {
             throw std::runtime_error("model id must be non-empty");
         }
+        validate_model_id(entry.id);
         if (!seen.insert(entry.id).second) {
             throw std::runtime_error("duplicate model id: " + entry.id);
         }
@@ -106,8 +130,10 @@ ServerConfig load_config(const std::filesystem::path & path) {
                 throw std::runtime_error("null lora entry must use id breeze-base");
             }
             has_base = true;
+            entry.lora_source.clear();
         } else {
-            entry.lora = resolve_path(path, lora->as_string());
+            entry.lora_source = lora->as_string();
+            entry.lora = resolve_path(path, entry.lora_source);
             if (!engine::io::is_existing_directory(*entry.lora)) {
                 throw std::runtime_error("adapter directory missing: " + entry.lora->string());
             }
@@ -120,9 +146,10 @@ ServerConfig load_config(const std::filesystem::path & path) {
 
         const auto * voice_ref = item.find("voice_ref");
         const bool has_voice_ref = voice_ref != nullptr && !voice_ref->is_null();
-        entry.reference_text = load_reference_text(path, item);
+        entry.reference_text = load_reference_text(path, item, entry.reference_text_file_source);
         if (has_voice_ref) {
-            entry.voice_ref = resolve_path(path, voice_ref->as_string());
+            entry.voice_ref_source = voice_ref->as_string();
+            entry.voice_ref = resolve_path(path, entry.voice_ref_source);
             if (!engine::io::is_existing_file(*entry.voice_ref)) {
                 throw std::runtime_error("voice_ref missing: " + entry.voice_ref->string());
             }
@@ -140,6 +167,85 @@ ServerConfig load_config(const std::filesystem::path & path) {
         throw std::runtime_error("models must include breeze-base with lora: null");
     }
     return config;
+}
+
+std::string serialize_config(const ServerConfig & config) {
+    std::ostringstream out;
+    out << "{\n"
+        << "  \"host\": " << json_quote(config.host) << ",\n"
+        << "  \"port\": " << config.port << ",\n"
+        << "  \"backend\": " << json_quote(config.backend) << ",\n"
+        << "  \"device\": " << config.device << ",\n"
+        << "  \"threads\": " << config.threads << ",\n"
+        << "  \"max_queue_depth\": " << config.max_queue_depth << ",\n"
+        << "  \"base_model\": " << json_quote(config.base_model_source) << ",\n"
+        << "  \"base_revision\": " << json_quote(config.base_revision) << ",\n"
+        << "  \"models\": [\n";
+    for (size_t i = 0; i < config.models.size(); ++i) {
+        const auto & entry = config.models[i];
+        out << "    {\n"
+            << "      \"id\": " << json_quote(entry.id) << ",\n";
+        if (!entry.lora.has_value()) {
+            out << "      \"lora\": null,\n";
+        } else {
+            out << "      \"lora\": " << json_quote(entry.lora_source) << ",\n";
+        }
+        out << "      \"default_instruction\": " << json_quote(entry.default_instruction);
+        if (entry.voice_ref.has_value()) {
+            out << ",\n"
+                << "      \"voice_ref\": " << json_quote(entry.voice_ref_source);
+            if (entry.reference_text_file_source.has_value()) {
+                out << ",\n"
+                    << "      \"reference_text_file\": "
+                    << json_quote(*entry.reference_text_file_source);
+            } else {
+                out << ",\n"
+                    << "      \"reference_text\": " << json_quote(entry.reference_text);
+            }
+        }
+        out << "\n    }";
+        if (i + 1 < config.models.size()) {
+            out << ',';
+        }
+        out << '\n';
+    }
+    out << "  ]\n"
+        << "}\n";
+    return out.str();
+}
+
+void save_config_atomically(const ServerConfig & config) {
+    if (config.config_path.empty()) {
+        throw std::runtime_error("cannot save config: config_path is empty");
+    }
+    const auto tmp_path = std::filesystem::path(config.config_path.string() + ".tmp");
+    {
+        std::ofstream out(tmp_path, std::ios::binary | std::ios::trunc);
+        if (!out) {
+            throw std::runtime_error("failed to open temp config for write: " + tmp_path.string());
+        }
+        out << serialize_config(config);
+        out.flush();
+        if (!out) {
+            out.close();
+            std::error_code ec;
+            std::filesystem::remove(tmp_path, ec);
+            throw std::runtime_error("failed to write temp config: " + tmp_path.string());
+        }
+    }
+    std::error_code replace_ec;
+    std::filesystem::rename(tmp_path, config.config_path, replace_ec);
+    if (replace_ec) {
+        std::error_code remove_ec;
+        std::filesystem::remove(config.config_path, remove_ec);
+        std::filesystem::rename(tmp_path, config.config_path, replace_ec);
+        if (replace_ec) {
+            std::error_code cleanup_ec;
+            std::filesystem::remove(tmp_path, cleanup_ec);
+            throw std::runtime_error(
+                "failed to replace config file: " + config.config_path.string() + ": " + replace_ec.message());
+        }
+    }
 }
 
 }  // namespace breeze_lora_server

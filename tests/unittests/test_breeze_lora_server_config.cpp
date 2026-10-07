@@ -6,7 +6,10 @@
 #include <iostream>
 #include <stdexcept>
 
+using breeze_lora_server::is_loopback_host;
 using breeze_lora_server::load_config;
+using breeze_lora_server::save_config_atomically;
+using breeze_lora_server::serialize_config;
 using engine::test::require;
 
 namespace {
@@ -51,13 +54,31 @@ int main() {
         "    {\"id\": \"adapter-a\", \"lora\": \"lora-a\", \"default_instruction\": \"Calm.\"}\n"
         "  ]\n"
         "}\n");
-    const auto loaded = load_config(cfg);
+    auto loaded = load_config(cfg);
     require(loaded.port == 8090, "port");
     require(loaded.max_queue_depth == 2, "queue depth");
     require(loaded.models.size() == 2, "model count");
     require(loaded.models[1].default_instruction == "Calm.", "default instruction");
     require(!loaded.models[1].voice_ref.has_value(), "voice_ref unset");
-    require(loaded.config_dir == cfg.parent_path(), "config_dir");
+    require(loaded.config_dir == cfg.parent_path() ||
+                std::filesystem::equivalent(loaded.config_dir, cfg.parent_path()),
+            "config_dir");
+    require(loaded.models[1].lora_source == "lora-a", "lora source spelling");
+    require(loaded.base_model_source == "base", "base_model source spelling");
+    require(is_loopback_host(loaded.host), "loopback host 127.0.0.1");
+    require(is_loopback_host("localhost"), "loopback host localhost");
+    require(is_loopback_host("::1"), "loopback host ::1");
+    require(!is_loopback_host("0.0.0.0"), "non-loopback 0.0.0.0");
+
+    loaded.models[1].default_instruction = "Updated calm.";
+    save_config_atomically(loaded);
+    const auto reloaded = load_config(cfg);
+    require(reloaded.models[1].default_instruction == "Updated calm.", "persisted instruction");
+    require(reloaded.models[1].lora_source == "lora-a", "relative lora preserved after save");
+    require(reloaded.base_model_source == "base", "relative base_model preserved after save");
+    const auto serialized = serialize_config(reloaded);
+    require(serialized.find("\"lora\": \"lora-a\"") != std::string::npos, "serialize keeps relative lora");
+    require(serialized.find("Updated calm.") != std::string::npos, "serialize includes new instruction");
 
     write_minimal_wav(root / "ref.wav");
     write_text(root / "ref.txt", "Some call me nature.\n");
@@ -82,6 +103,14 @@ int main() {
     require(std::filesystem::equivalent(*with_voice.models[1].voice_ref, root / "ref.wav"), "voice_ref path");
     require(with_voice.models[1].reference_text == "Some call me nature.", "reference_text_file loaded");
     require(with_voice.models[1].default_instruction == "Narrate calmly.", "default instruction with voice");
+    require(with_voice.models[1].voice_ref_source == "ref.wav", "voice_ref source spelling");
+    require(with_voice.models[1].reference_text_file_source.has_value(), "reference_text_file source kept");
+    require(*with_voice.models[1].reference_text_file_source == "ref.txt", "reference_text_file spelling");
+    const auto voice_serialized = serialize_config(with_voice);
+    require(voice_serialized.find("\"reference_text_file\": \"ref.txt\"") != std::string::npos,
+            "serialize emits reference_text_file when that was the source");
+    require(voice_serialized.find("\"reference_text\":") == std::string::npos,
+            "serialize omits inline reference_text when file source exists");
 
     write_text(cfg,
         "{\n"
@@ -121,6 +150,28 @@ int main() {
         "  ]\n"
         "}\n");
     rejects([&] { load_config(cfg); }, "duplicate ids accepted");
+
+    write_text(cfg,
+        "{\n"
+        "  \"base_model\": \"base\",\n"
+        "  \"backend\": \"cpu\",\n"
+        "  \"models\": [\n"
+        "    {\"id\": \"breeze-base\", \"lora\": null},\n"
+        "    {\"id\": \"bad/id\", \"lora\": \"lora-a\"}\n"
+        "  ]\n"
+        "}\n");
+    rejects([&] { load_config(cfg); }, "model id with slash accepted");
+
+    write_text(cfg,
+        "{\n"
+        "  \"base_model\": \"base\",\n"
+        "  \"backend\": \"cpu\",\n"
+        "  \"models\": [\n"
+        "    {\"id\": \"breeze-base\", \"lora\": null},\n"
+        "    {\"id\": \"bad..id\", \"lora\": \"lora-a\"}\n"
+        "  ]\n"
+        "}\n");
+    rejects([&] { load_config(cfg); }, "model id with .. accepted");
 
     std::cout << "test_breeze_lora_server_config: ok\n";
     return 0;

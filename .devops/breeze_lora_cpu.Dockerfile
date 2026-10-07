@@ -14,7 +14,7 @@ RUN cmake -S . -B build \
       -DENGINE_ENABLE_CUDA=OFF \
       -DENGINE_BUILD_TESTS=ON \
       -DAUDIOCPP_BUILD_NATIVE_MODEL_MANAGER=OFF \
- && cmake --build build --parallel "${BUILD_JOBS}" --target breeze_lora_server breeze_lora_math_test breeze_lora_manifest_test breeze_lora_server_config_test
+ && cmake --build build --parallel "${BUILD_JOBS}" --target breeze_lora_server breeze_lora_math_test breeze_lora_manifest_test breeze_lora_server_config_test breeze_lora_server_ui_test
 
 FROM ubuntu:22.04
 ENV DEBIAN_FRONTEND=noninteractive
@@ -26,6 +26,7 @@ COPY --from=build /src/build/bin/breeze_lora_server /app/breeze_lora_server
 COPY --from=build /src/build/bin/breeze_lora_math_test /app/breeze_lora_math_test
 COPY --from=build /src/build/bin/breeze_lora_manifest_test /app/breeze_lora_manifest_test
 COPY --from=build /src/build/bin/breeze_lora_server_config_test /app/breeze_lora_server_config_test
+COPY --from=build /src/build/bin/breeze_lora_server_ui_test /app/breeze_lora_server_ui_test
 COPY app/breeze_lora_server/example.server.json /app/example.server.json
 EXPOSE 8080
 ENTRYPOINT ["/app/breeze_lora_server", "--config", "/app/server.json"]

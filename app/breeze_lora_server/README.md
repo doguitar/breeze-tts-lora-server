@@ -166,12 +166,18 @@ Docker (CUDA):
 
 ```bash
 docker build -f .devops/breeze_lora_cuda.Dockerfile -t local/breeze-lora-server:cuda12 .
+# Read-only mounts are fine for API-only use. For the management WebUI, mount the
+# config directory read-write so `server.json` and `webui-references/` can be saved.
 docker run --gpus all -p 8080:8080 \
   -v /path/to/models:/models:ro \
   -v /path/to/loras:/loras:ro \
-  -v /path/to/server.json:/app/server.json:ro \
-  local/breeze-lora-server:cuda12
+  -v /path/to/config-dir:/config:rw \
+  local/breeze-lora-server:cuda12 --config /config/server.json
 ```
+
+Bind `host` to `127.0.0.1`, `localhost`, or `::1` to enable WebUI management
+(instruction/reference saves and uploads). Non-loopback binds still serve the
+audition page and synthesis, but reject management writes with `403`.
 
 Select the adapter with the OpenAI `model` field:
 
@@ -200,8 +206,14 @@ other `response_format` are rejected with `400`.
 - `GET /health`
 - `GET /v1/models`
 - `POST /v1/audio/speech` (complete `audio/wav` by default, or `audio/mpeg` with `response_format=mp3`)
+- `GET /` — embedded WebUI (audition + management when loopback-bound)
+- `GET /ui/models` — `{ management_enabled, models: [{ id, default_instruction, has_voice_ref, reference_text }] }`
+- `PUT /ui/models/<id>` — update `default_instruction` / clear or edit reference transcript (loopback only)
+- `POST /ui/models/<id>/reference` — multipart `reference_audio` + `reference_text` (+ optional `default_instruction`); writes `webui-references/<id>.wav` (loopback only)
+- `POST /ui/audio/speech` — browser synthesis (JSON or multipart); forces WAV for multipart; request-level instruction/reference override saved defaults without persisting
 
 Select adapters with the OpenAI `model` field. `breeze-base` is the unadapted base.
+Management endpoints require a writable `server.json` (and `webui-references/` under the config directory for uploads).
 
 ## Request logging
 

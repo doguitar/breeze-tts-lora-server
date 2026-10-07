@@ -61,7 +61,7 @@ if ! docker build --progress=plain -f "$DOCKERFILE" -t "$VERIFY_TAG" "$REPO_ROOT
 fi
 
 if [ "$FLAVOR" = "cpu" ]; then
-    for test_binary in breeze_lora_math_test breeze_lora_manifest_test breeze_lora_server_config_test; do
+    for test_binary in breeze_lora_math_test breeze_lora_manifest_test breeze_lora_server_config_test breeze_lora_server_ui_test; do
         echo "running $test_binary in $VERIFY_TAG" | tee -a "$VERIFY_LOG"
         if ! docker run --rm --entrypoint "/app/$test_binary" "$VERIFY_TAG" >> "$VERIFY_LOG" 2>&1; then
             echo "$test_binary failed; see $VERIFY_LOG" | tee -a "$VERIFY_LOG" >&2
