@@ -263,7 +263,7 @@ Errors are JSON with a stable `type`:
 
 #### Request logging
 
-Every speech job logs exactly one line. **Request text is never logged.**
+Successful speech jobs log one timing line. Request text is not included on success.
 
 ```text
 [info][breeze_lora_server] speech request model=<id> first_load=<true|false> load_ms=<ms> generate_ms=<ms> status=ok
@@ -273,7 +273,9 @@ Every speech job logs exactly one line. **Request text is never logged.**
   `breeze-base` is activated at startup, so its first request is not a first load.
 - `load_ms` is the adapter/base switch time; switching only rebinds side-adapter
   buffers, so it is `0.0` in practice and when the id is already active.
-- Failures log the same fields with `status=error`.
+- Synthesis failures also log the same fields with `status=error`.
+- Any HTTP response other than `200` additionally logs full request details
+  (method, path, query, headers, body) plus the response status and body.
 
 Logging is on by default to stdout; `--log-file <path>` appends to a file instead.
 

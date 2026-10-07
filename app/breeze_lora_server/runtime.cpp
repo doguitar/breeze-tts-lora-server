@@ -164,6 +164,38 @@ std::string json_quote(const std::string & value) {
     return engine::io::json::stringify_string(value);
 }
 
+void log_non_success_request(const HttpRequest & request, const HttpResponse & response) {
+    if (response.status == 200) {
+        return;
+    }
+
+    std::ostringstream headers;
+    headers << '{';
+    bool first = true;
+    for (const auto & [key, value] : request.headers) {
+        if (!first) {
+            headers << ',';
+        }
+        first = false;
+        headers << json_quote(key) << ':' << json_quote(value);
+    }
+    headers << '}';
+
+    std::ostringstream message;
+    message << "non-success response"
+            << " status=" << response.status
+            << " method=" << request.method
+            << " path=" << request.path
+            << " query=" << json_quote(request.query)
+            << " headers=" << headers.str()
+            << " body=" << json_quote(request.body)
+            << " response_body=" << json_quote(response.body);
+    engine::debug::log_message(
+        engine::debug::LogLevel::Error,
+        "breeze_lora_server",
+        message.str());
+}
+
 }  // namespace
 
 ServerRuntime::ServerRuntime(ServerConfig config) : config_(std::move(config)) {
@@ -233,20 +265,22 @@ void ServerRuntime::request_shutdown() {
 }
 
 HttpResponse ServerRuntime::handle(const HttpRequest & request) {
+    HttpResponse response;
     try {
         if (request.method == "GET" && request.path == "/health") {
-            return handle_health();
+            response = handle_health();
+        } else if (request.method == "GET" && request.path == "/v1/models") {
+            response = handle_models();
+        } else if (request.method == "POST" && request.path == "/v1/audio/speech") {
+            response = handle_speech(request.body);
+        } else {
+            response = error_response(404, "not found", "invalid_request_error");
         }
-        if (request.method == "GET" && request.path == "/v1/models") {
-            return handle_models();
-        }
-        if (request.method == "POST" && request.path == "/v1/audio/speech") {
-            return handle_speech(request.body);
-        }
-        return error_response(404, "not found", "invalid_request_error");
     } catch (const std::exception & ex) {
-        return error_response(400, ex.what(), "invalid_request_error");
+        response = error_response(400, ex.what(), "invalid_request_error");
     }
+    log_non_success_request(request, response);
+    return response;
 }
 
 HttpResponse ServerRuntime::handle_health() const {
