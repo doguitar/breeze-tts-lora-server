@@ -1,7 +1,10 @@
 name: Build CPU image
 
 # Builds the CPU image from .devops/breeze_lora_cpu.Dockerfile and runs the
-# server's unit tests inside it. The image is pushed to GHCR on non-PR events.
+# server's unit tests inside it. Automatic builds run on relevant pushes to
+# main; PR-branch image builds require manual workflow_dispatch (select the
+# PR head branch in "Run workflow"). The image is pushed to GHCR on non-PR
+# events.
 #
 # Push tags:
 #   ghcr.io/<owner>/<repo>:cpu
@@ -10,16 +13,6 @@ name: Build CPU image
 on:
   push:
     branches: [main]
-    paths:
-      - "app/breeze_lora_server/**"
-      - "src/models/breeze_tts/**"
-      - "include/engine/models/breeze_tts/**"
-      - "tests/unittests/test_breeze_lora_*.cpp"
-      - "CMakeLists.txt"
-      - ".devops/breeze_lora_cpu.Dockerfile"
-      - ".dockerignore"
-      - ".github/workflows/cpu-image.yml"
-  pull_request:
     paths:
       - "app/breeze_lora_server/**"
       - "src/models/breeze_tts/**"
