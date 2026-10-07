@@ -41,6 +41,12 @@ struct ServerConfig {
 
 ServerConfig load_config(const std::filesystem::path & path);
 std::string serialize_config(const ServerConfig & config);
+// Atomically publish `source` over `destination` without deleting the live
+// destination first. On success, `source` no longer exists. Throws on failure
+// and leaves `destination` intact when the platform supports replace-in-place.
+void replace_file_atomically(
+    const std::filesystem::path & source,
+    const std::filesystem::path & destination);
 void save_config_atomically(const ServerConfig & config);
 bool is_loopback_host(const std::string & host);
 

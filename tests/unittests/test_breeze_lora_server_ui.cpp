@@ -178,12 +178,67 @@ void test_upload_and_empty_transcript() {
     require(body_contains(models, "Narrate calmly."), "instruction updated by upload");
     require(body_contains(models, "Some call me nature."), "transcript returned by ui models");
     require(std::filesystem::exists(root / "webui-references" / "adapter-a.wav"), "upload wav persisted");
+    require(!std::filesystem::exists(root / "webui-references" / "adapter-a.wav.tmp"),
+            "upload temp wav removed after publish");
 
     const auto reloaded = load_config(cfg_path);
     require(reloaded.models[1].voice_ref_source == "webui-references/adapter-a.wav",
             "relative webui voice_ref spelling");
     require(!reloaded.models[1].reference_text_file_source.has_value(), "inline reference_text after upload");
     require(reloaded.models[1].reference_text == "Some call me nature.", "inline transcript persisted");
+}
+
+void test_url_encoded_model_id() {
+    const auto root = std::filesystem::temp_directory_path() / "breeze_lora_server_ui_encoded_id";
+    std::filesystem::remove_all(root);
+    std::filesystem::create_directories(root / "base");
+    std::filesystem::create_directories(root / "lora spaced");
+    const auto cfg = root / "server.json";
+    write_text(cfg,
+        "{\n"
+        "  \"host\": \"127.0.0.1\",\n"
+        "  \"port\": 8092,\n"
+        "  \"backend\": \"cpu\",\n"
+        "  \"max_queue_depth\": 2,\n"
+        "  \"base_model\": \"base\",\n"
+        "  \"models\": [\n"
+        "    {\"id\": \"breeze-base\", \"lora\": null, \"default_instruction\": \"Base voice.\"},\n"
+        "    {\"id\": \"adapter a\", \"lora\": \"lora spaced\", \"default_instruction\": \"Calm.\"}\n"
+        "  ]\n"
+        "}\n");
+    ServerRuntime runtime(load_config(cfg), ServerRuntime::ConfigOnlyInit{});
+
+    auto update = make_request(
+        "PUT",
+        "/ui/models/adapter%20a",
+        "{\"default_instruction\":\"Encoded path works.\",\"reference_text\":null,\"clear_reference\":false}",
+        "application/json");
+    auto response = runtime.handle(update);
+    require(response.status == 200, "encoded model id update status");
+
+    const auto reloaded = load_config(cfg);
+    require(reloaded.models[1].id == "adapter a", "spaced model id intact");
+    require(reloaded.models[1].default_instruction == "Encoded path works.",
+            "persisted instruction for encoded model id");
+
+    const std::string boundary = "encboundary";
+    const auto body = multipart_body(
+        boundary,
+        {{"reference_text", "Spaced model transcript."}, {"default_instruction", "Narrate spaced."}},
+        "reference_audio",
+        "ref.wav",
+        minimal_wav_bytes());
+    auto upload = make_request(
+        "POST",
+        "/ui/models/adapter%20a/reference",
+        body,
+        "multipart/form-data; boundary=" + boundary);
+    auto upload_response = runtime.handle(upload);
+    require(upload_response.status == 200, "encoded model id reference upload");
+    require(std::filesystem::exists(root / "webui-references" / "adapter a.wav"),
+            "upload wav uses decoded model id");
+    require(!std::filesystem::exists(root / "webui-references" / "adapter a.wav.tmp"),
+            "upload temp wav removed after publish");
 }
 
 void test_access_non_loopback() {
@@ -234,6 +289,7 @@ void test_access_non_loopback() {
 int main() {
     test_persistence_and_instruction_only();
     test_upload_and_empty_transcript();
+    test_url_encoded_model_id();
     test_access_non_loopback();
     std::cout << "test_breeze_lora_server_ui: ok\n";
     return 0;

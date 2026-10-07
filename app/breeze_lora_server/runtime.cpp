@@ -17,6 +17,7 @@
 #include <iomanip>
 #include <sstream>
 #include <stdexcept>
+#include <string_view>
 #include <vector>
 
 namespace breeze_lora_server {
@@ -222,6 +223,39 @@ const MultipartPart * find_part(const std::vector<MultipartPart> & parts, const 
     return nullptr;
 }
 
+int hex_value(char ch) {
+    if (ch >= '0' && ch <= '9') {
+        return ch - '0';
+    }
+    if (ch >= 'a' && ch <= 'f') {
+        return ch - 'a' + 10;
+    }
+    if (ch >= 'A' && ch <= 'F') {
+        return ch - 'A' + 10;
+    }
+    return -1;
+}
+
+// Percent-decode a path segment. Unlike form decoding, '+' stays literal because
+// encodeURIComponent emits '%20' for spaces.
+std::string percent_decode_path_segment(std::string_view value) {
+    std::string out;
+    out.reserve(value.size());
+    for (size_t i = 0; i < value.size(); ++i) {
+        if (value[i] == '%' && i + 2 < value.size()) {
+            const int hi = hex_value(value[i + 1]);
+            const int lo = hex_value(value[i + 2]);
+            if (hi >= 0 && lo >= 0) {
+                out.push_back(static_cast<char>((hi << 4) | lo));
+                i += 2;
+                continue;
+            }
+        }
+        out.push_back(value[i]);
+    }
+    return out;
+}
+
 std::optional<std::string> ui_model_id_from_path(const std::string & path, bool reference_suffix) {
     static constexpr std::string_view kPrefix = "/ui/models/";
     if (path.rfind(kPrefix.data(), 0) != 0) {
@@ -231,17 +265,23 @@ std::optional<std::string> ui_model_id_from_path(const std::string & path, bool 
     if (rest.empty()) {
         return std::nullopt;
     }
+    std::string encoded_id;
     if (reference_suffix) {
         static constexpr std::string_view kSuffix = "/reference";
         if (rest.size() <= kSuffix.size() || rest.compare(rest.size() - kSuffix.size(), kSuffix.size(), kSuffix) != 0) {
             return std::nullopt;
         }
-        return rest.substr(0, rest.size() - kSuffix.size());
+        encoded_id = rest.substr(0, rest.size() - kSuffix.size());
+    } else {
+        if (rest.find('/') != std::string::npos) {
+            return std::nullopt;
+        }
+        encoded_id = rest;
     }
-    if (rest.find('/') != std::string::npos) {
+    if (encoded_id.empty()) {
         return std::nullopt;
     }
-    return rest;
+    return percent_decode_path_segment(encoded_id);
 }
 
 void write_binary_file(const std::filesystem::path & path, std::string_view bytes) {
@@ -602,13 +642,15 @@ HttpResponse ServerRuntime::handle_ui_reference_upload(
 
     const std::string relative = "webui-references/" + model_id + ".wav";
     const auto absolute = (pending.config_dir / relative).lexically_normal();
-    const bool upload_existed = std::filesystem::exists(absolute);
+    const auto upload_tmp = std::filesystem::path(absolute.string() + ".tmp");
     std::filesystem::create_directories(absolute.parent_path());
 
+    bool config_saved = false;
     try {
-        write_binary_file(absolute, audio_part->data);
-        // Re-validate from the persisted path using the shared loader.
-        (void) load_voice_ref(absolute);
+        // Stage to a sibling temp file so a failed encode/save never truncates an
+        // existing published reference WAV in place.
+        write_binary_file(upload_tmp, audio_part->data);
+        (void) load_voice_ref(upload_tmp);
 
         target->voice_ref = absolute;
         target->voice_ref_source = relative;
@@ -618,14 +660,17 @@ HttpResponse ServerRuntime::handle_ui_reference_upload(
             target->default_instruction = *instruction_override;
         }
 
-        save_config_atomically(pending);
-
         ModelDefaults next_defaults;
         next_defaults.default_instruction = target->default_instruction;
         next_defaults.reference_text = target->reference_text;
         if (generator_ != nullptr) {
             next_defaults.reference_codes = generator_->encode_reference(audio);
         }
+
+        save_config_atomically(pending);
+        config_saved = true;
+        replace_file_atomically(upload_tmp, absolute);
+
         {
             std::lock_guard<std::mutex> lock(defaults_mutex_);
             for (auto & entry : config_.models) {
@@ -637,14 +682,14 @@ HttpResponse ServerRuntime::handle_ui_reference_upload(
             model_defaults_[model_id] = std::move(next_defaults);
         }
     } catch (const std::exception & ex) {
-        if (!upload_existed) {
-            std::error_code ec;
-            std::filesystem::remove(absolute, ec);
-        }
-        try {
-            save_config_atomically(previous);
-        } catch (...) {
-            // Best-effort restore; surface the original failure below.
+        std::error_code ec;
+        std::filesystem::remove(upload_tmp, ec);
+        if (config_saved) {
+            try {
+                save_config_atomically(previous);
+            } catch (...) {
+                // Best-effort restore; surface the original failure below.
+            }
         }
         {
             std::lock_guard<std::mutex> lock(defaults_mutex_);

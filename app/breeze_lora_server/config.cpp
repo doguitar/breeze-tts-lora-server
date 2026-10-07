@@ -6,7 +6,18 @@
 #include <fstream>
 #include <stdexcept>
 #include <sstream>
+#include <string>
 #include <unordered_set>
+
+#if defined(_WIN32)
+#    ifndef WIN32_LEAN_AND_MEAN
+#        define WIN32_LEAN_AND_MEAN
+#    endif
+#    ifndef NOMINMAX
+#        define NOMINMAX
+#    endif
+#    include <windows.h>
+#endif
 
 namespace breeze_lora_server {
 namespace {
@@ -214,6 +225,31 @@ std::string serialize_config(const ServerConfig & config) {
     return out.str();
 }
 
+void replace_file_atomically(
+    const std::filesystem::path & source,
+    const std::filesystem::path & destination) {
+#if defined(_WIN32)
+    // MoveFileEx can replace an existing destination without deleting it first.
+    // std::filesystem::rename cannot on Windows, and delete-then-rename can lose
+    // both the live file and the temp if the second rename fails.
+    if (!::MoveFileExW(
+            source.c_str(),
+            destination.c_str(),
+            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
+        const DWORD err = ::GetLastError();
+        throw std::runtime_error(
+            "failed to replace file: " + destination.string() + " (win32=" + std::to_string(err) + ")");
+    }
+#else
+    std::error_code ec;
+    std::filesystem::rename(source, destination, ec);
+    if (ec) {
+        throw std::runtime_error(
+            "failed to replace file: " + destination.string() + ": " + ec.message());
+    }
+#endif
+}
+
 void save_config_atomically(const ServerConfig & config) {
     if (config.config_path.empty()) {
         throw std::runtime_error("cannot save config: config_path is empty");
@@ -233,18 +269,13 @@ void save_config_atomically(const ServerConfig & config) {
             throw std::runtime_error("failed to write temp config: " + tmp_path.string());
         }
     }
-    std::error_code replace_ec;
-    std::filesystem::rename(tmp_path, config.config_path, replace_ec);
-    if (replace_ec) {
-        std::error_code remove_ec;
-        std::filesystem::remove(config.config_path, remove_ec);
-        std::filesystem::rename(tmp_path, config.config_path, replace_ec);
-        if (replace_ec) {
-            std::error_code cleanup_ec;
-            std::filesystem::remove(tmp_path, cleanup_ec);
-            throw std::runtime_error(
-                "failed to replace config file: " + config.config_path.string() + ": " + replace_ec.message());
-        }
+    try {
+        replace_file_atomically(tmp_path, config.config_path);
+    } catch (...) {
+        // Live destination is still intact; drop the temp publish attempt.
+        std::error_code cleanup_ec;
+        std::filesystem::remove(tmp_path, cleanup_ec);
+        throw;
     }
 }
 
