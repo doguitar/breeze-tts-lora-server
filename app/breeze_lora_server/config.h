@@ -39,6 +39,7 @@ struct ServerConfig {
     std::vector<VoiceEntry> voices;
 };
 
+void validate_voice_id(const std::string & id);
 ServerConfig load_config(const std::filesystem::path & path);
 std::string serialize_config(const ServerConfig & config);
 // Atomically publish `source` over `destination` without deleting the live
