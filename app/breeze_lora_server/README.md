@@ -220,6 +220,7 @@ other `response_format` are rejected with `400`.
 - `POST /v1/audio/speech` (complete `audio/wav` by default, or `audio/mpeg` with `response_format=mp3`); requires `model: "breeze-base"` and accepts optional `voice`
 - `GET /` — embedded WebUI (audition + management when loopback-bound)
 - `GET /ui/voices` — `{ management_enabled, voices: [{ id, default_instruction, has_voice_ref, reference_text }] }`
+- `POST /ui/voices` — create an instruction-only preset (JSON `id` + `default_instruction`) or a cloned preset (multipart `id`, `default_instruction`, `reference_audio`, `reference_text`); `lora` stays unset (loopback only)
 - `PUT /ui/voices/<id>` — update `default_instruction` / clear or edit reference transcript (loopback only)
 - `POST /ui/voices/<id>/reference` — multipart `reference_audio` + `reference_text` (+ optional `default_instruction`); writes `webui-references/<id>.wav` (loopback only)
 - `POST /ui/audio/speech` — browser synthesis (JSON or multipart); forces WAV for multipart; request-level instruction/reference override saved defaults without persisting

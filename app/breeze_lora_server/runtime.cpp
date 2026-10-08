@@ -446,6 +446,8 @@ HttpResponse ServerRuntime::handle(const HttpRequest & request) {
             }
         } else if (request.method == "POST" && request.path == "/ui/audio/speech") {
             response = handle_ui_speech(request);
+        } else if (request.method == "POST" && request.path == "/ui/voices") {
+            response = handle_ui_voice_create(request);
         } else if (request.method == "POST") {
             if (const auto voice_id = ui_voice_id_from_path(request.path, true)) {
                 response = handle_ui_reference_upload(request, *voice_id);
@@ -596,6 +598,165 @@ HttpResponse ServerRuntime::handle_ui_voice_update(
             }
         }
         voice_defaults_[voice_id] = std::move(next_defaults);
+    }
+
+    return json_response("{\"ok\":true}");
+}
+
+HttpResponse ServerRuntime::handle_ui_voice_create(const HttpRequest & request) {
+    if (!ui_management_enabled()) {
+        return error_response(403, "management UI requires a loopback bind", "invalid_request_error");
+    }
+
+    const auto content_type = request_content_type(request);
+    const bool multipart = extract_multipart_boundary(content_type).has_value();
+
+    std::string id;
+    std::string default_instruction;
+    std::string reference_text;
+    std::string wav_bytes;
+    bool has_wav = false;
+    bool has_transcript = false;
+
+    if (multipart) {
+        const auto boundary = extract_multipart_boundary(content_type);
+        const auto parts = parse_multipart_body(request.body, *boundary);
+        const auto * id_part = find_part(parts, "id");
+        const auto * instruction_part = find_part(parts, "default_instruction");
+        const auto * audio_part = find_part(parts, "reference_audio");
+        const auto * text_part = find_part(parts, "reference_text");
+        if (id_part == nullptr || id_part->data.empty()) {
+            return error_response(400, "id must be non-empty", "invalid_request_error");
+        }
+        if (instruction_part == nullptr || instruction_part->data.empty()) {
+            return error_response(400, "default_instruction must be non-empty", "invalid_request_error");
+        }
+        id = id_part->data;
+        default_instruction = instruction_part->data;
+        has_wav = audio_part != nullptr && !audio_part->data.empty();
+        has_transcript = text_part != nullptr && !text_part->data.empty();
+        if (has_wav != has_transcript) {
+            return error_response(
+                400,
+                "reference_audio and reference_text must be provided together",
+                "invalid_request_error");
+        }
+        if (!has_wav) {
+            return error_response(400, "reference_audio WAV upload is required", "invalid_request_error");
+        }
+        wav_bytes = audio_part->data;
+        reference_text = text_part->data;
+    } else {
+        const auto body = engine::io::json::parse(request.body);
+        if (!body.is_object()) {
+            return error_response(400, "request body must be a JSON object", "invalid_request_error");
+        }
+        id = engine::io::json::require_string(body, "id");
+        default_instruction = engine::io::json::require_string(body, "default_instruction");
+        if (id.empty()) {
+            return error_response(400, "id must be non-empty", "invalid_request_error");
+        }
+        if (default_instruction.empty()) {
+            return error_response(400, "default_instruction must be non-empty", "invalid_request_error");
+        }
+        const auto * reference_text_value = body.find("reference_text");
+        if (reference_text_value != nullptr && !reference_text_value->is_null()) {
+            return error_response(
+                400,
+                "reference_audio and reference_text must be provided together",
+                "invalid_request_error");
+        }
+    }
+
+    if (id == kBreezeBaseModelId) {
+        return error_response(400, "voice id must not be breeze-base", "invalid_request_error");
+    }
+    try {
+        validate_voice_id(id);
+    } catch (const std::exception & ex) {
+        return error_response(400, ex.what(), "invalid_request_error");
+    }
+
+    engine::runtime::AudioBuffer audio;
+    if (has_wav) {
+        try {
+            audio = load_voice_ref_bytes(wav_bytes, "uploaded reference_audio");
+        } catch (const std::exception & ex) {
+            return error_response(400, ex.what(), "invalid_request_error");
+        }
+    }
+
+    ServerConfig pending;
+    ServerConfig previous;
+    {
+        std::lock_guard<std::mutex> lock(defaults_mutex_);
+        pending = config_;
+        previous = config_;
+    }
+    for (const auto & entry : pending.voices) {
+        if (entry.id == id) {
+            return error_response(400, "duplicate voice id: " + id, "invalid_request_error");
+        }
+    }
+
+    VoiceEntry created;
+    created.id = id;
+    created.default_instruction = default_instruction;
+    if (has_wav) {
+        const std::string relative = "webui-references/" + id + ".wav";
+        const auto absolute = (pending.config_dir / relative).lexically_normal();
+        created.voice_ref = absolute;
+        created.voice_ref_source = relative;
+        created.reference_text = reference_text;
+    }
+
+    const auto upload_tmp = has_wav
+        ? std::filesystem::path(created.voice_ref->string() + ".tmp")
+        : std::filesystem::path{};
+    if (has_wav) {
+        std::filesystem::create_directories(created.voice_ref->parent_path());
+    }
+
+    bool config_saved = false;
+    try {
+        if (has_wav) {
+            write_binary_file(upload_tmp, wav_bytes);
+            (void) load_voice_ref(upload_tmp);
+        }
+        pending.voices.push_back(created);
+        VoiceDefaults next_defaults;
+        next_defaults.default_instruction = created.default_instruction;
+        next_defaults.reference_text = created.reference_text;
+        if (has_wav && generator_ != nullptr) {
+            next_defaults.reference_codes = generator_->encode_reference(audio);
+        }
+        save_config_atomically(pending);
+        config_saved = true;
+        if (has_wav) {
+            replace_file_atomically(upload_tmp, *created.voice_ref);
+        }
+        {
+            std::lock_guard<std::mutex> lock(defaults_mutex_);
+            config_.voices.push_back(created);
+            voice_defaults_[id] = std::move(next_defaults);
+        }
+    } catch (const std::exception & ex) {
+        std::error_code ec;
+        if (has_wav) {
+            std::filesystem::remove(upload_tmp, ec);
+        }
+        if (config_saved) {
+            try {
+                save_config_atomically(previous);
+            } catch (...) {
+            }
+        }
+        {
+            std::lock_guard<std::mutex> lock(defaults_mutex_);
+            config_ = previous;
+            voice_defaults_.erase(id);
+        }
+        return error_response(400, ex.what(), "invalid_request_error");
     }
 
     return json_response("{\"ok\":true}");

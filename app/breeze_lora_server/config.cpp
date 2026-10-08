@@ -30,12 +30,6 @@ std::filesystem::path resolve_path(const std::filesystem::path & config_path, co
     return (config_path.parent_path() / path).lexically_normal();
 }
 
-void validate_voice_id(const std::string & id) {
-    if (id.find('/') != std::string::npos || id.find('\\') != std::string::npos || id.find("..") != std::string::npos) {
-        throw std::runtime_error("voice id must not contain '/', '\\', or '..': " + id);
-    }
-}
-
 std::string load_reference_text(
     const std::filesystem::path & config_path,
     const engine::io::json::Value & item,
@@ -81,6 +75,12 @@ std::string json_quote(const std::string & value) {
 }
 
 }  // namespace
+
+void validate_voice_id(const std::string & id) {
+    if (id.find('/') != std::string::npos || id.find('\\') != std::string::npos || id.find("..") != std::string::npos) {
+        throw std::runtime_error("voice id must not contain '/', '\\', or '..': " + id);
+    }
+}
 
 bool is_loopback_host(const std::string & host) {
     return host == "127.0.0.1" || host == "localhost" || host == "::1";

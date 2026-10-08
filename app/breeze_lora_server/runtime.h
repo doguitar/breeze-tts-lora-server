@@ -82,6 +82,7 @@ private:
     minitts::server::HttpResponse handle_ui_voice_update(
         const minitts::server::HttpRequest & request,
         const std::string & voice_id);
+    minitts::server::HttpResponse handle_ui_voice_create(const minitts::server::HttpRequest & request);
     minitts::server::HttpResponse handle_ui_reference_upload(
         const minitts::server::HttpRequest & request,
         const std::string & voice_id);
