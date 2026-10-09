@@ -26,6 +26,8 @@ struct VoiceEntry {
 
 struct ServerConfig {
     std::string host = "0.0.0.0";
+    // When true, preset writes are allowed even if host is not loopback.
+    bool management = false;
     int port = 8080;
     std::string backend = "cuda";
     int device = 0;

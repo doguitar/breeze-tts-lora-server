@@ -409,7 +409,7 @@ void ServerRuntime::request_shutdown() {
 }
 
 bool ServerRuntime::ui_management_enabled() const {
-    return is_loopback_host(config_.host);
+    return config_.management || is_loopback_host(config_.host);
 }
 
 HttpResponse ServerRuntime::enqueue_job(std::shared_ptr<Job> job) {
@@ -490,6 +490,7 @@ HttpResponse ServerRuntime::handle_ui_index() const {
 HttpResponse ServerRuntime::handle_ui_voices() const {
     std::ostringstream out;
     out << "{\"management_enabled\":" << (ui_management_enabled() ? "true" : "false")
+        << ",\"loopback_bind\":" << (is_loopback_host(config_.host) ? "true" : "false")
         << ",\"voices\":[";
     bool first = true;
     {

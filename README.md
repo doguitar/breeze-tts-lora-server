@@ -195,6 +195,7 @@ stay inside the mounted tree.
 ```json
 {
   "host": "0.0.0.0",
+  "management": true,
   "port": 8080,
   "backend": "cuda",
   "device": 0,
@@ -222,6 +223,7 @@ stay inside the mounted tree.
 | Field | Meaning |
 |---|---|
 | `host`, `port` | Listen address. Port must be 1–65535. |
+| `management` | Optional boolean, default `false`. `true` allows preset writes (Save preset, Clear reference, New preset id) even when `host` is not loopback, including a published Docker port on `0.0.0.0`. Anyone who can open the page can then write presets. Absent or `false` keeps preset writes limited to a loopback bind (`127.0.0.1`, `localhost`, or `::1`). A non-boolean value is a config error. Generate / audition does not depend on this flag. |
 | `backend` | `cuda` or `cpu`. |
 | `device` | Backend device index. |
 | `threads` | Worker threads for the backend. Must be positive. |

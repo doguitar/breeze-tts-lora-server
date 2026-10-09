@@ -62,13 +62,14 @@ section h2 {
 label {
   display: block; font-size: 0.8rem; color: var(--muted); margin: 0.7rem 0 0.3rem;
 }
+label[hidden], input[hidden] { display: none; }
 label:first-of-type { margin-top: 0; }
-select, textarea, input[type="file"] {
+select, textarea, input[type="file"], input[type="text"] {
   width: 100%; background: #0f1117; color: var(--text);
   border: 1px solid var(--line); border-radius: var(--radius);
   padding: 0.55rem 0.65rem; font: inherit;
 }
-select:focus, textarea:focus {
+select:focus, textarea:focus, input[type="text"]:focus {
   outline: 1px solid var(--focus); border-color: var(--accent-dim);
 }
 textarea { min-height: 5.5rem; resize: vertical; line-height: 1.4; }
@@ -119,7 +120,7 @@ button:not(:disabled):hover { filter: brightness(1.06); }
 <header>
   <h1>Breeze LoRA</h1>
   <span class="tag">audition · instruction · reference preset</span>
-  <span id="mgmtPill" class="pill off">management: checking…</span>
+  <span id="mgmtPill" class="pill off">Preset saving: off</span>
 </header>
 <main>
   <section>
@@ -127,7 +128,7 @@ button:not(:disabled):hover { filter: brightness(1.06); }
     <label for="voice">Voice</label>
     <select id="voice"></select>
     <label for="newVoiceId" id="newVoiceIdLabel" hidden>New preset id</label>
-    <input id="newVoiceId" type="text" placeholder="new-voice-id" hidden>
+    <input id="newVoiceId" type="text" placeholder="Name for the new preset" hidden>
     <label for="input">Input</label>
     <textarea id="input" placeholder="Text to speak"></textarea>
     <label for="instruction">Instruction</label>
@@ -145,6 +146,7 @@ button:not(:disabled):hover { filter: brightness(1.06); }
       <button id="clearBtn" class="danger" type="button">Clear reference</button>
     </div>
     <p class="hint">An unsaved WAV clones for this request only and does not write a preset. Save on breeze-base writes a new preset (instruction only, or a clone when a WAV and transcript are set). Unsaved instruction overrides the saved default. Instruction-only voice presets are valid.</p>
+    <p id="manageHint" class="hint">Set "management": true in server.json and restart.</p>
     <div id="status"></div>
   </section>
   <section>
@@ -153,7 +155,8 @@ button:not(:disabled):hover { filter: brightness(1.06); }
   </section>
 </main>
 <script>
-(() => {
+)HTML"
+    R"HTML((() => {
   const BASE_VOICE_VALUE = '';
   const BUILTIN_INSTRUCTION = 'Speak clearly and naturally.';
   const els = {
@@ -171,10 +174,12 @@ button:not(:disabled):hover { filter: brightness(1.06); }
     history: document.getElementById('history'),
     mgmtPill: document.getElementById('mgmtPill'),
     refPill: document.getElementById('refPill'),
+    manageHint: document.getElementById('manageHint'),
   };
 
   let voices = [];
   let managementEnabled = false;
+  let loopbackBind = false;
   const objectUrls = [];
 
   function setStatus(message, kind) {
@@ -230,17 +235,26 @@ button:not(:disabled):hover { filter: brightness(1.06); }
     updateRefPill(voice);
   }
 
-  function setManagementEnabled(enabled) {
+  function setManagementEnabled(enabled, loopback) {
     managementEnabled = !!enabled;
+    if (loopback !== undefined) loopbackBind = !!loopback;
     const base = isBaseSelection();
-    els.saveBtn.disabled = !managementEnabled;
-    els.clearBtn.disabled = !managementEnabled || base;
+    const voice = selectedVoice();
+    const name = els.newVoiceId.value.trim();
+    const instruction = els.instruction.value.trim();
     els.newVoiceId.hidden = !(managementEnabled && base);
     els.newVoiceIdLabel.hidden = !(managementEnabled && base);
-    els.mgmtPill.textContent = managementEnabled
-      ? 'management: enabled'
-      : 'management: loopback only (audition still works)';
+    els.saveBtn.disabled = !managementEnabled || (base && (!name || !instruction));
+    els.clearBtn.disabled = !managementEnabled || !voice || !voice.has_voice_ref;
+    els.mgmtPill.textContent = managementEnabled ? 'Preset saving: on' : 'Preset saving: off';
     els.mgmtPill.className = managementEnabled ? 'pill on' : 'pill off';
+    if (!managementEnabled) {
+      els.manageHint.textContent = 'Set "management": true in server.json and restart.';
+    } else if (!loopbackBind) {
+      els.manageHint.textContent = 'Anyone who can open the page can write presets.';
+    } else {
+      els.manageHint.textContent = '';
+    }
   }
 
   async function loadVoices() {
@@ -266,8 +280,9 @@ button:not(:disabled):hover { filter: brightness(1.06); }
     } else {
       els.voice.value = BASE_VOICE_VALUE;
     }
-    applyVoiceFields(selectedVoice());
-    setManagementEnabled(!!data.management_enabled);
+)HTML"
+    R"HTML(    applyVoiceFields(selectedVoice());
+    setManagementEnabled(!!data.management_enabled, !!data.loopback_bind);
     setStatus('Ready', 'ok');
   }
 
@@ -386,7 +401,8 @@ button:not(:disabled):hover { filter: brightness(1.06); }
     item.appendChild(link);
     els.history.prepend(item);
   }
-
+)HTML"
+    R"HTML(
   async function generate() {
     const voice = selectedVoice();
     const input = requireInput();
@@ -448,6 +464,8 @@ button:not(:disabled):hover { filter: brightness(1.06); }
     applyVoiceFields(selectedVoice());
     setManagementEnabled(managementEnabled);
   });
+  els.newVoiceId.addEventListener('input', () => setManagementEnabled(managementEnabled));
+  els.instruction.addEventListener('input', () => setManagementEnabled(managementEnabled));
   els.generateBtn.addEventListener('click', wrap(generate));
   els.saveBtn.addEventListener('click', wrap(savePreset));
   els.clearBtn.addEventListener('click', wrap(clearReference));
