@@ -179,9 +179,13 @@ docker run --gpus all -p 8080:8080 \
   local/breeze-lora-server:cuda12 --config /config/server.json
 ```
 
-Bind `host` to `127.0.0.1`, `localhost`, or `::1` to enable WebUI management
-(instruction/reference saves and uploads). Non-loopback binds still serve the
-audition page and synthesis, but reject management writes with `403`.
+Preset writes (Save preset, Clear reference, new preset id) are allowed when
+`host` is loopback (`127.0.0.1`, `localhost`, or `::1`), or when `server.json`
+sets `"management": true`. A published Docker port needs `"host": "0.0.0.0"`
+and `"management": true`; anyone who can open the page can then write presets.
+Absent or `false`, a non-loopback bind still serves the audition page and
+synthesis, and rejects preset writes with `403`. Generate / audition does not
+depend on this flag.
 
 `model` must be `breeze-base`. Select a configured voice with the optional
 `voice` field:
@@ -218,17 +222,17 @@ other `response_format` are rejected with `400`.
 - `GET /health`
 - `GET /v1/models` — singleton `{ id: "breeze-base", object: "model", owned_by: "breeze-lora-server" }`
 - `POST /v1/audio/speech` (complete `audio/wav` by default, or `audio/mpeg` with `response_format=mp3`); requires `model: "breeze-base"` and accepts optional `voice`
-- `GET /` — embedded WebUI (audition + management when loopback-bound)
-- `GET /ui/voices` — `{ management_enabled, voices: [{ id, default_instruction, has_voice_ref, reference_text }] }`
-- `POST /ui/voices` — create an instruction-only preset (JSON `id` + `default_instruction`) or a cloned preset (multipart `id`, `default_instruction`, `reference_audio`, `reference_text`); `lora` stays unset (loopback only)
-- `PUT /ui/voices/<id>` — update `default_instruction` / clear or edit reference transcript (loopback only)
-- `POST /ui/voices/<id>/reference` — multipart `reference_audio` + `reference_text` (+ optional `default_instruction`); writes `webui-references/<id>.wav` (loopback only)
+- `GET /` — embedded WebUI (audition always; preset writes when management is enabled)
+- `GET /ui/voices` — `{ management_enabled, loopback_bind, voices: [{ id, default_instruction, has_voice_ref, reference_text }] }`
+- `POST /ui/voices` — create an instruction-only preset (JSON `id` + `default_instruction`) or a cloned preset (multipart `id`, `default_instruction`, `reference_audio`, `reference_text`); `lora` stays unset (management enabled only)
+- `PUT /ui/voices/<id>` — update `default_instruction` / clear or edit reference transcript (management enabled only)
+- `POST /ui/voices/<id>/reference` — multipart `reference_audio` + `reference_text` (+ optional `default_instruction`); writes `webui-references/<id>.wav` (management enabled only)
 - `POST /ui/audio/speech` — browser synthesis (JSON or multipart); forces WAV for multipart; request-level instruction/reference override saved defaults without persisting
 
 The OpenAI model identity is always `breeze-base`. Configured adapters and
-instruction/reference presets are selected with `voice`. Management endpoints
-require a writable `server.json` (and `webui-references/` under the config
-directory for uploads).
+instruction/reference presets are selected with `voice`. Preset-write endpoints
+require management to be enabled and a writable `server.json` (and
+`webui-references/` under the config directory for uploads).
 
 ## Request logging
 
