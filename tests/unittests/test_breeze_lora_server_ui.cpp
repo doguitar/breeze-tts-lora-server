@@ -340,6 +340,92 @@ void test_api_model_and_voice_selection() {
     require(body_contains(unknown_voice, "unknown voice id: missing"), "unknown voice error text");
 }
 
+void test_create_voice_and_reference_input_enabled() {
+    const auto root = std::filesystem::temp_directory_path() / "breeze_lora_server_ui_create";
+    auto config = make_temp_config(root, "127.0.0.1");
+    ServerRuntime runtime(std::move(config), ServerRuntime::ConfigOnlyInit{});
+
+    auto index = runtime.handle(make_request("GET", "/"));
+    require(index.status == 200, "index for script check");
+    require(index.body.find("els.referenceAudio.disabled") == std::string::npos,
+            "reference file input is not disabled");
+    require(index.body.find("els.referenceText.disabled") == std::string::npos,
+            "reference transcript is not disabled");
+    require(body_contains(index, "id=\"newVoiceId\""), "new preset id field present");
+    require(body_contains(index, "unsaved WAV clones for this request only"), "hint describes unsaved clone");
+
+    auto created = runtime.handle(make_request(
+        "POST",
+        "/ui/voices",
+        "{\"id\":\"clone-note\",\"default_instruction\":\"Soft.\"}",
+        "application/json"));
+    require(created.status == 200, "instruction-only create status");
+    const auto reloaded = load_config(root / "server.json");
+    require(reloaded.voices.size() == 3, "voice appended");
+    require(reloaded.voices[2].id == "clone-note", "created id");
+    require(!reloaded.voices[2].lora.has_value(), "created voice has no lora");
+    require(reloaded.voices[2].default_instruction == "Soft.", "created instruction");
+    require(!reloaded.voices[2].voice_ref.has_value(), "instruction-only has no wav");
+
+    auto voices = runtime.handle(make_request("GET", "/ui/voices"));
+    require(body_contains(voices, "clone-note"), "list includes created voice");
+
+    const std::string boundary = "createboundary";
+    const auto body = multipart_body(
+        boundary,
+        {{"id", "clone-wav"}, {"default_instruction", "Clone."}, {"reference_text", "Hello clone."}},
+        "reference_audio",
+        "ref.wav",
+        minimal_wav_bytes());
+    auto upload = runtime.handle(make_request(
+        "POST",
+        "/ui/voices",
+        body,
+        "multipart/form-data; boundary=" + boundary));
+    require(upload.status == 200, "reference create status");
+    require(std::filesystem::exists(root / "webui-references" / "clone-wav.wav"), "created wav stored");
+    const auto with_ref = load_config(root / "server.json");
+    require(with_ref.voices.size() == 4, "reference voice appended");
+    require(with_ref.voices[3].reference_text == "Hello clone.", "created transcript");
+    require(with_ref.voices[3].voice_ref_source == "webui-references/clone-wav.wav", "created voice_ref spelling");
+
+    auto dup = runtime.handle(make_request(
+        "POST",
+        "/ui/voices",
+        "{\"id\":\"clone-note\",\"default_instruction\":\"Again.\"}",
+        "application/json"));
+    require(dup.status == 400, "duplicate id rejected");
+    require(body_contains(dup, "duplicate voice id"), "duplicate error text");
+
+    auto reserved = runtime.handle(make_request(
+        "POST",
+        "/ui/voices",
+        "{\"id\":\"breeze-base\",\"default_instruction\":\"Nope.\"}",
+        "application/json"));
+    require(reserved.status == 400, "breeze-base id rejected");
+
+    auto transcript_only = runtime.handle(make_request(
+        "POST",
+        "/ui/voices",
+        "{\"id\":\"orphan\",\"default_instruction\":\"Nope.\",\"reference_text\":\"words\"}",
+        "application/json"));
+    require(transcript_only.status == 400, "transcript without wav rejected");
+}
+
+void test_create_voice_non_loopback() {
+    const auto root = std::filesystem::temp_directory_path() / "breeze_lora_server_ui_create_deny";
+    auto config = make_temp_config(root, "0.0.0.0");
+    const auto before = std::filesystem::last_write_time(root / "server.json");
+    ServerRuntime runtime(std::move(config), ServerRuntime::ConfigOnlyInit{});
+    auto created = runtime.handle(make_request(
+        "POST",
+        "/ui/voices",
+        "{\"id\":\"remote\",\"default_instruction\":\"Nope.\"}",
+        "application/json"));
+    require(created.status == 403, "create forbidden off loopback");
+    require(std::filesystem::last_write_time(root / "server.json") == before, "config unchanged on create 403");
+}
+
 }  // namespace
 
 int main() {
@@ -348,6 +434,8 @@ int main() {
     test_url_encoded_voice_id();
     test_access_non_loopback();
     test_api_model_and_voice_selection();
+    test_create_voice_and_reference_input_enabled();
+    test_create_voice_non_loopback();
     std::cout << "test_breeze_lora_server_ui: ok\n";
     return 0;
 }

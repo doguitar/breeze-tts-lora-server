@@ -126,6 +126,8 @@ button:not(:disabled):hover { filter: brightness(1.06); }
     <h2>Speak</h2>
     <label for="voice">Voice</label>
     <select id="voice"></select>
+    <label for="newVoiceId" id="newVoiceIdLabel" hidden>New preset id</label>
+    <input id="newVoiceId" type="text" placeholder="new-voice-id" hidden>
     <label for="input">Input</label>
     <textarea id="input" placeholder="Text to speak"></textarea>
     <label for="instruction">Instruction</label>
@@ -142,7 +144,7 @@ button:not(:disabled):hover { filter: brightness(1.06); }
       <button id="saveBtn" type="button">Save preset</button>
       <button id="clearBtn" class="danger" type="button">Clear reference</button>
     </div>
-    <p class="hint">Unsaved WAV/transcript overrides the saved voice reference. Unsaved instruction overrides the saved default. The first option synthesizes the unadapted base with no saved preset. Instruction-only voice presets are valid.</p>
+    <p class="hint">An unsaved WAV clones for this request only and does not write a preset. Save on breeze-base writes a new preset (instruction only, or a clone when a WAV and transcript are set). Unsaved instruction overrides the saved default. Instruction-only voice presets are valid.</p>
     <div id="status"></div>
   </section>
   <section>
@@ -156,6 +158,8 @@ button:not(:disabled):hover { filter: brightness(1.06); }
   const BUILTIN_INSTRUCTION = 'Speak clearly and naturally.';
   const els = {
     voice: document.getElementById('voice'),
+    newVoiceId: document.getElementById('newVoiceId'),
+    newVoiceIdLabel: document.getElementById('newVoiceIdLabel'),
     input: document.getElementById('input'),
     instruction: document.getElementById('instruction'),
     referenceAudio: document.getElementById('referenceAudio'),
@@ -228,10 +232,11 @@ button:not(:disabled):hover { filter: brightness(1.06); }
 
   function setManagementEnabled(enabled) {
     managementEnabled = !!enabled;
-    const canManage = managementEnabled && !isBaseSelection();
-    els.saveBtn.disabled = !canManage;
-    els.clearBtn.disabled = !canManage;
-    els.referenceAudio.disabled = !canManage;
+    const base = isBaseSelection();
+    els.saveBtn.disabled = !managementEnabled;
+    els.clearBtn.disabled = !managementEnabled || base;
+    els.newVoiceId.hidden = !(managementEnabled && base);
+    els.newVoiceIdLabel.hidden = !(managementEnabled && base);
     els.mgmtPill.textContent = managementEnabled
       ? 'management: enabled'
       : 'management: loopback only (audition still works)';
@@ -281,7 +286,6 @@ button:not(:disabled):hover { filter: brightness(1.06); }
   async function savePreset() {
     if (!managementEnabled) throw new Error('Management UI requires a loopback bind');
     const voice = selectedVoice();
-    if (!voice) throw new Error('Select a saved voice to manage');
     const instruction = els.instruction.value.trim();
     if (!instruction) throw new Error('Instruction must be non-empty');
     const wav = pickedWav();
@@ -290,6 +294,32 @@ button:not(:disabled):hover { filter: brightness(1.06); }
 
     setStatus('Saving preset…');
     let response;
+    if (!voice) {
+      const newId = els.newVoiceId.value.trim();
+      if (!newId) throw new Error('New preset id is required');
+      if (wav) {
+        const form = new FormData();
+        form.append('id', newId);
+        form.append('default_instruction', instruction);
+        form.append('reference_audio', wav, wav.name || 'reference.wav');
+        form.append('reference_text', transcript);
+        response = await fetch('/ui/voices', { method: 'POST', body: form });
+      } else {
+        response = await fetch('/ui/voices', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ id: newId, default_instruction: instruction }),
+        });
+      }
+      if (!response.ok) throw new Error(await readError(response));
+      els.newVoiceId.value = '';
+      await loadVoices();
+      els.voice.value = newId;
+      applyVoiceFields(selectedVoice());
+      setManagementEnabled(managementEnabled);
+      setStatus('Preset saved', 'ok');
+      return;
+    }
     if (wav) {
       const form = new FormData();
       form.append('reference_audio', wav, wav.name || 'reference.wav');
