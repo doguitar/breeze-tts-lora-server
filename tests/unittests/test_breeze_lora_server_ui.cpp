@@ -76,7 +76,10 @@ bool body_contains(const HttpResponse & response, const std::string & needle) {
     return response.body.find(needle) != std::string::npos;
 }
 
-ServerConfig make_temp_config(const std::filesystem::path & root, const std::string & host) {
+ServerConfig make_temp_config(
+    const std::filesystem::path & root,
+    const std::string & host,
+    bool management = false) {
     std::filesystem::remove_all(root);
     std::filesystem::create_directories(root / "base");
     std::filesystem::create_directories(root / "lora-a");
@@ -84,6 +87,7 @@ ServerConfig make_temp_config(const std::filesystem::path & root, const std::str
     write_text(cfg,
         "{\n"
         "  \"host\": \"" + host + "\",\n"
+        "  \"management\": " + std::string(management ? "true" : "false") + ",\n"
         "  \"port\": 8091,\n"
         "  \"backend\": \"cpu\",\n"
         "  \"max_queue_depth\": 2,\n"
@@ -116,6 +120,7 @@ void test_persistence_and_instruction_only() {
     auto voices = runtime.handle(make_request("GET", "/ui/voices"));
     require(voices.status == 200, "ui voices status");
     require(body_contains(voices, "\"management_enabled\":true"), "management enabled on loopback");
+    require(body_contains(voices, "\"loopback_bind\":true"), "loopback bind reported");
     require(body_contains(voices, "Updated via UI."), "ui voices shows new instruction");
 
     // Temporary unsaved instruction on speech must not rewrite server.json.
@@ -257,6 +262,7 @@ void test_access_non_loopback() {
     auto voices = runtime.handle(make_request("GET", "/ui/voices"));
     require(voices.status == 200, "GET /ui/voices on non-loopback");
     require(body_contains(voices, "\"management_enabled\":false"), "management disabled");
+    require(body_contains(voices, "\"loopback_bind\":false"), "non-loopback bind reported");
 
     auto update = make_request(
         "PUT",
@@ -352,6 +358,18 @@ void test_create_voice_and_reference_input_enabled() {
     require(index.body.find("els.referenceText.disabled") == std::string::npos,
             "reference transcript is not disabled");
     require(body_contains(index, "id=\"newVoiceId\""), "new preset id field present");
+    require(body_contains(index, "Name for the new preset"), "new preset id names the preset");
+    require(body_contains(index, "label[hidden], input[hidden] { display: none; }"),
+            "hidden label is not forced visible");
+    require(body_contains(index, "Preset saving: on"), "pill can say saving on");
+    require(body_contains(index, "Preset saving: off"), "pill can say saving off");
+    require(body_contains(index, "Set \"management\": true in server.json and restart."),
+            "hint tells the user how to turn saving on");
+    require(body_contains(index, "Anyone who can open the page can write presets."),
+            "hint warns when saving is on off loopback");
+    require(index.body.find("els.saveBtn.disabled = !managementEnabled;") == std::string::npos,
+            "save is not enabled by the management flag alone");
+    require(body_contains(index, "voice.has_voice_ref"), "clear follows a stored reference");
     require(body_contains(index, "unsaved WAV clones for this request only"), "hint describes unsaved clone");
 
     auto created = runtime.handle(make_request(
@@ -412,6 +430,53 @@ void test_create_voice_and_reference_input_enabled() {
     require(transcript_only.status == 400, "transcript without wav rejected");
 }
 
+void test_management_true_allows_writes_off_loopback() {
+    const auto root = std::filesystem::temp_directory_path() / "breeze_lora_server_ui_mgmt";
+    auto config = make_temp_config(root, "0.0.0.0", true);
+    ServerRuntime runtime(std::move(config), ServerRuntime::ConfigOnlyInit{});
+
+    auto voices = runtime.handle(make_request("GET", "/ui/voices"));
+    require(voices.status == 200, "voices with management flag");
+    require(body_contains(voices, "\"management_enabled\":true"), "management flag enables saving");
+    require(body_contains(voices, "\"loopback_bind\":false"), "flag does not pretend the bind is loopback");
+
+    auto created = runtime.handle(make_request(
+        "POST",
+        "/ui/voices",
+        "{\"id\":\"remote-note\",\"default_instruction\":\"Soft.\"}",
+        "application/json"));
+    require(created.status == 200, "save creates a preset when management is true");
+
+    const std::string boundary = "mgmtboundary";
+    const auto body = multipart_body(
+        boundary,
+        {{"id", "remote-wav"}, {"default_instruction", "Clone."}, {"reference_text", "Hello clone."}},
+        "reference_audio",
+        "ref.wav",
+        minimal_wav_bytes());
+    auto upload = runtime.handle(make_request(
+        "POST",
+        "/ui/voices",
+        body,
+        "multipart/form-data; boundary=" + boundary));
+    require(upload.status == 200, "save stores a reference when management is true");
+
+    auto cleared = runtime.handle(make_request(
+        "PUT",
+        "/ui/voices/remote-wav",
+        "{\"default_instruction\":\"Clone.\",\"reference_text\":null,\"clear_reference\":true}",
+        "application/json"));
+    require(cleared.status == 200, "clear removes a stored reference when management is true");
+    const auto reloaded = load_config(root / "server.json");
+    const breeze_lora_server::VoiceEntry * cleared_voice = nullptr;
+    for (const auto & voice : reloaded.voices) {
+        if (voice.id == "remote-wav") cleared_voice = &voice;
+    }
+    require(cleared_voice != nullptr, "cleared voice still listed");
+    require(!cleared_voice->voice_ref.has_value(), "stored reference removed");
+    require(reloaded.management, "management flag survives a preset write");
+}
+
 void test_create_voice_non_loopback() {
     const auto root = std::filesystem::temp_directory_path() / "breeze_lora_server_ui_create_deny";
     auto config = make_temp_config(root, "0.0.0.0");
@@ -436,6 +501,7 @@ int main() {
     test_api_model_and_voice_selection();
     test_create_voice_and_reference_input_enabled();
     test_create_voice_non_loopback();
+    test_management_true_allows_writes_off_loopback();
     std::cout << "test_breeze_lora_server_ui: ok\n";
     return 0;
 }

@@ -71,6 +71,38 @@ int main() {
     require(is_loopback_host("localhost"), "loopback host localhost");
     require(is_loopback_host("::1"), "loopback host ::1");
     require(!is_loopback_host("0.0.0.0"), "non-loopback 0.0.0.0");
+    require(!loaded.management, "management defaults to false when absent");
+
+    write_text(cfg,
+        "{\n"
+        "  \"host\": \"0.0.0.0\",\n"
+        "  \"management\": true,\n"
+        "  \"base_model\": \"base\",\n"
+        "  \"backend\": \"cpu\",\n"
+        "  \"voices\": []\n"
+        "}\n");
+    const auto managed = load_config(cfg);
+    require(managed.management, "management true is loaded");
+    require(serialize_config(managed).find("\"management\": true") != std::string::npos,
+            "serialize keeps management true");
+
+    write_text(cfg,
+        "{\n"
+        "  \"management\": false,\n"
+        "  \"base_model\": \"base\",\n"
+        "  \"backend\": \"cpu\",\n"
+        "  \"voices\": []\n"
+        "}\n");
+    require(!load_config(cfg).management, "management false is loaded");
+
+    write_text(cfg,
+        "{\n"
+        "  \"management\": \"yes\",\n"
+        "  \"base_model\": \"base\",\n"
+        "  \"backend\": \"cpu\",\n"
+        "  \"voices\": []\n"
+        "}\n");
+    rejects([&] { load_config(cfg); }, "non-boolean management accepted");
 
     loaded.voices[0].default_instruction = "Updated calm.";
     save_config_atomically(loaded);

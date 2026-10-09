@@ -92,6 +92,12 @@ ServerConfig load_config(const std::filesystem::path & path) {
     config.config_path = std::filesystem::absolute(path).lexically_normal();
     config.config_dir = config.config_path.parent_path();
     config.host = engine::io::json::optional_string(root, "host", config.host);
+    if (const auto * management = root.find("management")) {
+        if (!management->is_bool()) {
+            throw std::runtime_error("management must be a boolean");
+        }
+        config.management = management->as_bool();
+    }
     config.port = engine::io::json::optional_i32(root, "port", config.port);
     config.backend = engine::io::json::optional_string(root, "backend", config.backend);
     config.device = engine::io::json::optional_i32(root, "device", config.device);
@@ -179,6 +185,7 @@ std::string serialize_config(const ServerConfig & config) {
     std::ostringstream out;
     out << "{\n"
         << "  \"host\": " << json_quote(config.host) << ",\n"
+        << "  \"management\": " << (config.management ? "true" : "false") << ",\n"
         << "  \"port\": " << config.port << ",\n"
         << "  \"backend\": " << json_quote(config.backend) << ",\n"
         << "  \"device\": " << config.device << ",\n"
