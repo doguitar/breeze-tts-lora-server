@@ -4,6 +4,7 @@
 #include "http.h"
 
 #include "engine/framework/core/execution_context.h"
+#include "engine/framework/io/json.h"
 #include "engine/models/breeze_tts/assets.h"
 #include "engine/models/breeze_tts/generator.h"
 #include "engine/models/breeze_tts/speech_decoder.h"
@@ -17,6 +18,7 @@
 #include <mutex>
 #include <optional>
 #include <string>
+#include <vector>
 #include <thread>
 #include <unordered_map>
 #include <unordered_set>
@@ -89,6 +91,12 @@ private:
     minitts::server::HttpResponse handle_ui_speech(const minitts::server::HttpRequest & request);
     bool ui_management_enabled() const;
     minitts::server::HttpResponse enqueue_job(std::shared_ptr<Job> job);
+    std::optional<std::string> apply_speech_sampling_from_json(
+        const engine::io::json::Value & body,
+        Job & job);
+    std::optional<std::string> apply_speech_sampling_from_multipart(
+        const std::vector<minitts::server::MultipartPart> & parts,
+        Job & job);
     void worker_loop();
     void activate_voice(const std::string & voice_id);
     minitts::server::HttpResponse synthesize(const Job & job);

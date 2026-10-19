@@ -2633,6 +2633,7 @@ add_executable(breeze_lora_server
     app/breeze_lora_server/main.cpp
     app/breeze_lora_server/config.cpp
     app/breeze_lora_server/runtime.cpp
+    app/breeze_lora_server/speech_sampling.cpp
     app/breeze_lora_server/ui_assets.cpp
     app/server/http.cpp
     app/server/multipart.cpp
@@ -3064,10 +3065,20 @@ if (ENGINE_BUILD_TESTS OR ENGINE_BUILD_EXTENDED_TESTS OR ENGINE_BUILD_MODEL_TEST
             ${CMAKE_CURRENT_SOURCE_DIR}/app/breeze_lora_server)
         add_test(NAME breeze_lora_server_config_test COMMAND breeze_lora_server_config_test)
 
+        add_executable(breeze_lora_server_seed_test
+            tests/unittests/test_breeze_lora_server_seed.cpp
+            app/breeze_lora_server/speech_sampling.cpp)
+        target_link_libraries(breeze_lora_server_seed_test PRIVATE engine_runtime ggml)
+        target_include_directories(breeze_lora_server_seed_test PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}/tests/unittests
+            ${CMAKE_CURRENT_SOURCE_DIR}/app/breeze_lora_server)
+        add_test(NAME breeze_lora_server_seed_test COMMAND breeze_lora_server_seed_test)
+
         add_executable(breeze_lora_server_ui_test
             tests/unittests/test_breeze_lora_server_ui.cpp
             app/breeze_lora_server/config.cpp
             app/breeze_lora_server/runtime.cpp
+            app/breeze_lora_server/speech_sampling.cpp
             app/breeze_lora_server/ui_assets.cpp
             app/server/http.cpp
             app/server/multipart.cpp)

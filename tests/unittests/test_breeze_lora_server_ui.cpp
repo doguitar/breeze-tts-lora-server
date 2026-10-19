@@ -477,6 +477,65 @@ void test_management_true_allows_writes_off_loopback() {
     require(reloaded.management, "management flag survives a preset write");
 }
 
+void test_speech_seed_validation_and_ui() {
+    const auto root = std::filesystem::temp_directory_path() / "breeze_lora_server_ui_seed";
+    auto config = make_temp_config(root, "127.0.0.1");
+    ServerRuntime runtime(std::move(config), ServerRuntime::ConfigOnlyInit{});
+
+    auto bad_seed = runtime.handle(make_request(
+        "POST",
+        "/v1/audio/speech",
+        "{\"model\":\"breeze-base\",\"voice\":\"adapter-a\",\"input\":\"hello\",\"seed\":-2,\"response_format\":\"wav\"}",
+        "application/json"));
+    require(bad_seed.status == 400, "invalid v1 seed rejected");
+    require(body_contains(bad_seed, "invalid_request_error"), "v1 seed error type");
+    require(body_contains(bad_seed, "seed must be"), "v1 seed error message");
+
+    auto good_seed = runtime.handle(make_request(
+        "POST",
+        "/v1/audio/speech",
+        "{\"model\":\"breeze-base\",\"voice\":\"adapter-a\",\"input\":\"hello\",\"seed\":42,\"response_format\":\"wav\"}",
+        "application/json"));
+    require(good_seed.status == 500, "valid v1 seed reaches synthesis");
+
+    auto ui_json_seed = runtime.handle(make_request(
+        "POST",
+        "/ui/audio/speech",
+        "{\"model\":\"breeze-base\",\"voice\":\"adapter-a\",\"input\":\"hello\",\"seed\":-1,\"response_format\":\"wav\"}",
+        "application/json"));
+    require(ui_json_seed.status == 500, "ui json -1 seed accepted");
+
+    const std::string boundary = "seedboundary";
+    const auto multipart = multipart_body(
+        boundary,
+        {
+            {"model", "breeze-base"},
+            {"voice", "adapter-a"},
+            {"input", "hello"},
+            {"instruction", "Calm."},
+            {"seed", "42"},
+            {"reference_text", "Some call me nature."},
+        },
+        "reference_audio",
+        "ref.wav",
+        minimal_wav_bytes());
+    auto ui_multipart = runtime.handle(make_request(
+        "POST",
+        "/ui/audio/speech",
+        multipart,
+        "multipart/form-data; boundary=" + boundary));
+    require(ui_multipart.status == 500, "multipart speech with seed accepted");
+
+    auto index = runtime.handle(make_request("GET", "/"));
+    require(body_contains(index, "id=\"seed\""), "seed control present");
+    require(body_contains(index, "min=\"-1\""), "seed min -1");
+    require(body_contains(index, "max=\"4294967295\""), "seed max u32");
+    require(body_contains(index, "value=\"-1\""), "seed default -1");
+    require(body_contains(index, "-1 means random"), "seed random hint");
+    require(body_contains(index, "form.append('seed'"), "multipart sends seed");
+    require(body_contains(index, "seed,"), "json payload includes seed");
+}
+
 void test_create_voice_non_loopback() {
     const auto root = std::filesystem::temp_directory_path() / "breeze_lora_server_ui_create_deny";
     auto config = make_temp_config(root, "0.0.0.0");
@@ -502,6 +561,7 @@ int main() {
     test_create_voice_and_reference_input_enabled();
     test_create_voice_non_loopback();
     test_management_true_allows_writes_off_loopback();
+    test_speech_seed_validation_and_ui();
     std::cout << "test_breeze_lora_server_ui: ok\n";
     return 0;
 }
