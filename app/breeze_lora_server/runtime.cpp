@@ -257,6 +257,81 @@ std::optional<std::string> parse_form_f32(std::string_view text, float & out) {
     }
 }
 
+int hex_value(char ch) {
+    if (ch >= '0' && ch <= '9') {
+        return ch - '0';
+    }
+    if (ch >= 'a' && ch <= 'f') {
+        return ch - 'a' + 10;
+    }
+    if (ch >= 'A' && ch <= 'F') {
+        return ch - 'A' + 10;
+    }
+    return -1;
+}
+
+// Percent-decode a path segment. Unlike form decoding, '+' stays literal because
+// encodeURIComponent emits '%20' for spaces.
+std::string percent_decode_path_segment(std::string_view value) {
+    std::string out;
+    out.reserve(value.size());
+    for (size_t i = 0; i < value.size(); ++i) {
+        if (value[i] == '%' && i + 2 < value.size()) {
+            const int hi = hex_value(value[i + 1]);
+            const int lo = hex_value(value[i + 2]);
+            if (hi >= 0 && lo >= 0) {
+                out.push_back(static_cast<char>((hi << 4) | lo));
+                i += 2;
+                continue;
+            }
+        }
+        out.push_back(value[i]);
+    }
+    return out;
+}
+
+std::optional<std::string> ui_voice_id_from_path(const std::string & path, bool reference_suffix) {
+    static constexpr std::string_view kPrefix = "/ui/voices/";
+    if (path.rfind(kPrefix.data(), 0) != 0) {
+        return std::nullopt;
+    }
+    const std::string rest = path.substr(kPrefix.size());
+    if (rest.empty()) {
+        return std::nullopt;
+    }
+    std::string encoded_id;
+    if (reference_suffix) {
+        static constexpr std::string_view kSuffix = "/reference";
+        if (rest.size() <= kSuffix.size() || rest.compare(rest.size() - kSuffix.size(), kSuffix.size(), kSuffix) != 0) {
+            return std::nullopt;
+        }
+        encoded_id = rest.substr(0, rest.size() - kSuffix.size());
+    } else {
+        if (rest.find('/') != std::string::npos) {
+            return std::nullopt;
+        }
+        encoded_id = rest;
+    }
+    if (encoded_id.empty()) {
+        return std::nullopt;
+    }
+    return percent_decode_path_segment(encoded_id);
+}
+
+void write_binary_file(const std::filesystem::path & path, std::string_view bytes) {
+    std::ofstream out(path, std::ios::binary | std::ios::trunc);
+    if (!out) {
+        throw std::runtime_error("failed to write file: " + path.string());
+    }
+    out.write(bytes.data(), static_cast<std::streamsize>(bytes.size()));
+    out.flush();
+    if (!out) {
+        throw std::runtime_error("failed to flush file: " + path.string());
+    }
+}
+
+}  // namespace
+
 std::optional<std::string> ServerRuntime::apply_speech_sampling_from_json(
     const engine::io::json::Value & body,
     Job & job) {
@@ -333,81 +408,6 @@ std::optional<std::string> ServerRuntime::apply_speech_sampling_from_multipart(
     }
     return std::nullopt;
 }
-
-int hex_value(char ch) {
-    if (ch >= '0' && ch <= '9') {
-        return ch - '0';
-    }
-    if (ch >= 'a' && ch <= 'f') {
-        return ch - 'a' + 10;
-    }
-    if (ch >= 'A' && ch <= 'F') {
-        return ch - 'A' + 10;
-    }
-    return -1;
-}
-
-// Percent-decode a path segment. Unlike form decoding, '+' stays literal because
-// encodeURIComponent emits '%20' for spaces.
-std::string percent_decode_path_segment(std::string_view value) {
-    std::string out;
-    out.reserve(value.size());
-    for (size_t i = 0; i < value.size(); ++i) {
-        if (value[i] == '%' && i + 2 < value.size()) {
-            const int hi = hex_value(value[i + 1]);
-            const int lo = hex_value(value[i + 2]);
-            if (hi >= 0 && lo >= 0) {
-                out.push_back(static_cast<char>((hi << 4) | lo));
-                i += 2;
-                continue;
-            }
-        }
-        out.push_back(value[i]);
-    }
-    return out;
-}
-
-std::optional<std::string> ui_voice_id_from_path(const std::string & path, bool reference_suffix) {
-    static constexpr std::string_view kPrefix = "/ui/voices/";
-    if (path.rfind(kPrefix.data(), 0) != 0) {
-        return std::nullopt;
-    }
-    const std::string rest = path.substr(kPrefix.size());
-    if (rest.empty()) {
-        return std::nullopt;
-    }
-    std::string encoded_id;
-    if (reference_suffix) {
-        static constexpr std::string_view kSuffix = "/reference";
-        if (rest.size() <= kSuffix.size() || rest.compare(rest.size() - kSuffix.size(), kSuffix.size(), kSuffix) != 0) {
-            return std::nullopt;
-        }
-        encoded_id = rest.substr(0, rest.size() - kSuffix.size());
-    } else {
-        if (rest.find('/') != std::string::npos) {
-            return std::nullopt;
-        }
-        encoded_id = rest;
-    }
-    if (encoded_id.empty()) {
-        return std::nullopt;
-    }
-    return percent_decode_path_segment(encoded_id);
-}
-
-void write_binary_file(const std::filesystem::path & path, std::string_view bytes) {
-    std::ofstream out(path, std::ios::binary | std::ios::trunc);
-    if (!out) {
-        throw std::runtime_error("failed to write file: " + path.string());
-    }
-    out.write(bytes.data(), static_cast<std::streamsize>(bytes.size()));
-    out.flush();
-    if (!out) {
-        throw std::runtime_error("failed to flush file: " + path.string());
-    }
-}
-
-}  // namespace
 
 void ServerRuntime::init_voice_maps() {
     for (const auto & entry : config_.voices) {
