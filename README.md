@@ -319,7 +319,7 @@ curl -sS http://127.0.0.1:8080/v1/audio/speech \
 | `instruction` | Optional voice direction. Falls back to the voice's `default_instruction`, or the built-in instruction when `voice` is omitted. |
 | `voice_ref` / `reference_text` | Optional request-level clone override. Must be supplied **together**. |
 | `response_format` | Optional. Non-streaming formats: `wav` (default, `audio/wav`) or `mp3` (`audio/mpeg`). |
-| `seed`, `guidance_scale`, `temperature`, `depth_temperature`, `top_k`, `top_p`, `max_tokens` | Breeze sampling controls. |
+| `seed`, `guidance_scale`, `temperature`, `depth_temperature`, `top_k`, `top_p`, `max_tokens` | Breeze sampling controls. `seed` is `-1` for random output or `0`–`4294967295` for a fixed seed (omitted defaults to `0`). |
 
 Returns a complete audio body: `audio/wav` (RIFF/WAVE) by default, or `audio/mpeg`
 when `response_format` is `mp3`. `stream` and `stream_format` are rejected with

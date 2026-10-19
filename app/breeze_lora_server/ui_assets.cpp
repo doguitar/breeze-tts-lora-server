@@ -64,12 +64,12 @@ label {
 }
 label[hidden], input[hidden] { display: none; }
 label:first-of-type { margin-top: 0; }
-select, textarea, input[type="file"], input[type="text"] {
+select, textarea, input[type="file"], input[type="text"], input[type="number"] {
   width: 100%; background: #0f1117; color: var(--text);
   border: 1px solid var(--line); border-radius: var(--radius);
   padding: 0.55rem 0.65rem; font: inherit;
 }
-select:focus, textarea:focus, input[type="text"]:focus {
+select:focus, textarea:focus, input[type="text"]:focus, input[type="number"]:focus {
   outline: 1px solid var(--focus); border-color: var(--accent-dim);
 }
 textarea { min-height: 5.5rem; resize: vertical; line-height: 1.4; }
@@ -133,6 +133,9 @@ button:not(:disabled):hover { filter: brightness(1.06); }
     <textarea id="input" placeholder="Text to speak"></textarea>
     <label for="instruction">Instruction</label>
     <textarea id="instruction" class="short" placeholder="Speaking style instruction"></textarea>
+    <label for="seed">Seed</label>
+    <input id="seed" type="number" min="-1" max="4294967295" value="-1" step="1">
+    <p class="hint">-1 means random output each generation; use 0–4294967295 for a fixed seed.</p>
     <label for="referenceAudio">Reference WAV (optional, unsaved overrides preset)</label>
     <input id="referenceAudio" type="file" accept="audio/wav,.wav">
     <label for="referenceText">Reference transcript</label>
@@ -165,6 +168,7 @@ button:not(:disabled):hover { filter: brightness(1.06); }
     newVoiceIdLabel: document.getElementById('newVoiceIdLabel'),
     input: document.getElementById('input'),
     instruction: document.getElementById('instruction'),
+    seed: document.getElementById('seed'),
     referenceAudio: document.getElementById('referenceAudio'),
     referenceText: document.getElementById('referenceText'),
     generateBtn: document.getElementById('generateBtn'),
@@ -298,6 +302,15 @@ button:not(:disabled):hover { filter: brightness(1.06); }
       : null;
   }
 
+  function requestSeedValue() {
+    const raw = els.seed.value.trim();
+    const value = raw === '' ? -1 : Number(raw);
+    if (!Number.isInteger(value) || value < -1 || value > 0xffffffff) {
+      throw new Error('Seed must be -1 or an unsigned 32-bit integer (0 to 4294967295).');
+    }
+    return value;
+  }
+
   async function savePreset() {
     if (!managementEnabled) throw new Error('Management UI requires a loopback bind');
     const voice = selectedVoice();
@@ -411,6 +424,7 @@ button:not(:disabled):hover { filter: brightness(1.06); }
     const wav = pickedWav();
     const transcript = els.referenceText.value.trim();
     if (wav && !transcript) throw new Error('Reference transcript is required when a WAV is selected');
+    const seed = requestSeedValue();
 
     setStatus('Generating…');
     let response;
@@ -420,6 +434,7 @@ button:not(:disabled):hover { filter: brightness(1.06); }
       if (voice) form.append('voice', voice.id);
       form.append('input', input);
       form.append('instruction', instruction);
+      form.append('seed', String(seed));
       form.append('reference_audio', wav, wav.name || 'reference.wav');
       form.append('reference_text', transcript);
       response = await fetch('/ui/audio/speech', { method: 'POST', body: form });
@@ -428,6 +443,7 @@ button:not(:disabled):hover { filter: brightness(1.06); }
         model: 'breeze-base',
         input,
         instruction,
+        seed,
         response_format: 'wav',
       };
       if (voice) payload.voice = voice.id;

@@ -1,6 +1,7 @@
 #include "runtime.h"
 
 #include "multipart.h"
+#include "speech_sampling.h"
 #include "ui_assets.h"
 
 #include "engine/framework/audio/wav_reader.h"
@@ -11,6 +12,7 @@
 #include <lame.h>
 
 #include <algorithm>
+#include <charconv>
 #include <chrono>
 #include <cmath>
 #include <fstream>
@@ -221,6 +223,115 @@ const MultipartPart * find_part(const std::vector<MultipartPart> & parts, const 
         }
     }
     return nullptr;
+}
+
+std::optional<std::string> parse_form_i64(std::string_view text, int64_t & out) {
+    if (text.empty()) {
+        return "must be an integer";
+    }
+    int64_t value = 0;
+    const auto * begin = text.data();
+    const auto * end = begin + text.size();
+    const auto result = std::from_chars(begin, end, value);
+    if (result.ec != std::errc() || result.ptr != end) {
+        return "must be an integer";
+    }
+    out = value;
+    return std::nullopt;
+}
+
+std::optional<std::string> parse_form_f32(std::string_view text, float & out) {
+    if (text.empty()) {
+        return "must be a number";
+    }
+    try {
+        size_t consumed = 0;
+        const double value = std::stod(std::string(text), &consumed);
+        if (consumed != text.size() || !std::isfinite(value)) {
+            return "must be a finite number";
+        }
+        out = static_cast<float>(value);
+        return std::nullopt;
+    } catch (...) {
+        return "must be a number";
+    }
+}
+
+std::optional<std::string> ServerRuntime::apply_speech_sampling_from_json(
+    const engine::io::json::Value & body,
+    Job & job) {
+    int64_t seed_raw = 0;
+    if (const auto error = parse_speech_seed_json(body, 0, seed_raw)) {
+        return error;
+    }
+    job.seed = resolve_speech_seed(seed_raw);
+    job.guidance_scale = engine::io::json::optional_f32(body, "guidance_scale", 1.0F);
+    job.temperature = engine::io::json::optional_f32(body, "temperature", 0.9F);
+    job.depth_temperature = engine::io::json::optional_f32(body, "depth_temperature", 0.9F);
+    job.top_k = engine::io::json::optional_i64(body, "top_k", 50);
+    job.top_p = engine::io::json::optional_f32(body, "top_p", 1.0F);
+    job.max_tokens = engine::io::json::optional_i64(body, "max_tokens", 1500);
+    return std::nullopt;
+}
+
+std::optional<std::string> ServerRuntime::apply_speech_sampling_from_multipart(
+    const std::vector<MultipartPart> & parts,
+    Job & job) {
+    const auto * seed_part = find_part(parts, "seed");
+    int64_t seed_raw = 0;
+    if (seed_part == nullptr) {
+        seed_raw = 0;
+    } else if (const auto error = parse_speech_seed_form(seed_part->data, 0, seed_raw)) {
+        return error;
+    }
+    job.seed = resolve_speech_seed(seed_raw);
+
+    const auto apply_i64 = [&](const char * name, int64_t default_value, auto setter) -> std::optional<std::string> {
+        const auto * part = find_part(parts, name);
+        if (part == nullptr) {
+            setter(default_value);
+            return std::nullopt;
+        }
+        int64_t value = 0;
+        if (const auto error = parse_form_i64(part->data, value)) {
+            return std::string(name) + " " + *error;
+        }
+        setter(value);
+        return std::nullopt;
+    };
+    const auto apply_f32 = [&](const char * name, float default_value, auto setter) -> std::optional<std::string> {
+        const auto * part = find_part(parts, name);
+        if (part == nullptr) {
+            setter(default_value);
+            return std::nullopt;
+        }
+        float value = 0.0F;
+        if (const auto error = parse_form_f32(part->data, value)) {
+            return std::string(name) + " " + *error;
+        }
+        setter(value);
+        return std::nullopt;
+    };
+
+    if (const auto error = apply_f32("guidance_scale", 1.0F, [&](float v) { job.guidance_scale = v; })) {
+        return error;
+    }
+    if (const auto error = apply_f32("temperature", 0.9F, [&](float v) { job.temperature = v; })) {
+        return error;
+    }
+    if (const auto error = apply_f32("depth_temperature", 0.9F, [&](float v) { job.depth_temperature = v; })) {
+        return error;
+    }
+    if (const auto error = apply_i64("top_k", 50, [&](int64_t v) { job.top_k = v; })) {
+        return error;
+    }
+    if (const auto error = apply_f32("top_p", 1.0F, [&](float v) { job.top_p = v; })) {
+        return error;
+    }
+    if (const auto error = apply_i64("max_tokens", 1500, [&](int64_t v) { job.max_tokens = v; })) {
+        return error;
+    }
+    return std::nullopt;
 }
 
 int hex_value(char ch) {
@@ -982,13 +1093,9 @@ HttpResponse ServerRuntime::handle_speech(const std::string & body_text) {
         job->reference_text = defaults_copy.reference_text;
     }
 
-    job->seed = static_cast<uint64_t>(engine::io::json::optional_i64(body, "seed", 0));
-    job->guidance_scale = engine::io::json::optional_f32(body, "guidance_scale", 1.0F);
-    job->temperature = engine::io::json::optional_f32(body, "temperature", 0.9F);
-    job->depth_temperature = engine::io::json::optional_f32(body, "depth_temperature", 0.9F);
-    job->top_k = engine::io::json::optional_i64(body, "top_k", 50);
-    job->top_p = engine::io::json::optional_f32(body, "top_p", 1.0F);
-    job->max_tokens = engine::io::json::optional_i64(body, "max_tokens", 1500);
+    if (const auto sampling_error = apply_speech_sampling_from_json(body, *job)) {
+        return error_response(400, *sampling_error, "invalid_request_error");
+    }
 
     return enqueue_job(std::move(job));
 }
@@ -1060,6 +1167,10 @@ HttpResponse ServerRuntime::handle_ui_speech(const HttpRequest & request) {
         } else if (defaults_copy.reference_codes.has_value()) {
             job->reference_codes = defaults_copy.reference_codes;
             job->reference_text = defaults_copy.reference_text;
+        }
+
+        if (const auto sampling_error = apply_speech_sampling_from_multipart(parts, *job)) {
+            return error_response(400, *sampling_error, "invalid_request_error");
         }
 
         return enqueue_job(std::move(job));
