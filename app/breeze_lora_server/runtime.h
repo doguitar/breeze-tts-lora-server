@@ -2,6 +2,9 @@
 
 #include "config.h"
 #include "http.h"
+#include "multipart.h"
+
+#include <vector>
 
 #include "engine/framework/core/execution_context.h"
 #include "engine/framework/io/json.h"
