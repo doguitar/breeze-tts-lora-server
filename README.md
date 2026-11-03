@@ -114,10 +114,24 @@ BREEZE_MODELS_DIR=/path/to/my-models \
 
 ### CUDA
 
+`:cuda` is Turing and newer (CUDA 12.8, `sm_75` through Blackwell `sm_120`). A Tesla P100 and the other pre-Turing cards need the CUDA 12.4 image; one toolkit cannot compile both `sm_60` and `sm_120`.
+
+| Tags | Image |
+|---|---|
+| `:cuda`, `:cu128`, `:turing`, `:ampere`, `:ada`, `:hopper`, `:blackwell` | CUDA 12.8.1, `sm_75` and up |
+| `:cu124`, `:maxwell`, `:pascal`, `:volta` | CUDA 12.4.1, `sm_50`/`60`/`61`/`70` |
+
 ```bash
 docker build -f .devops/breeze_lora_cuda.Dockerfile \
-  --build-arg CUDA_DOCKER_ARCH="80;86;89;90" \
+  --build-arg CUDA_VERSION=12.8.1 \
+  --build-arg CUDA_DOCKER_ARCH="75;80;86;89;90;120" \
   -t breeze-lora-server:cuda .
+
+# Tesla P100 (sm_60) and other Pascal / Maxwell / Volta cards
+docker build -f .devops/breeze_lora_cuda.Dockerfile \
+  --build-arg CUDA_VERSION=12.4.1 \
+  --build-arg CUDA_DOCKER_ARCH="50;60;61;70" \
+  -t breeze-lora-server:pascal .
 
 docker run --rm --gpus all -p 8080:8080 \
   -v /path/to/my-models:/models:ro \
@@ -133,8 +147,9 @@ Pre-built images are on GHCR:
 
 | Template | Image |
 |---|---|
-| CUDA | `ghcr.io/doguitar/breeze-tts-lora-server:cuda` |
-| CPU | `ghcr.io/doguitar/breeze-tts-lora-server:cpu` |
+| CUDA (Turing and newer) | `ghcr.io/doguitar/breeze-tts-lora-server:cuda` |
+| CUDA (Maxwell / Pascal / Volta, including P100) | `ghcr.io/doguitar/breeze-tts-lora-server:pascal` |
+| CPU (`:latest`) | `ghcr.io/doguitar/breeze-tts-lora-server:cpu` |
 
 XML templates live in [`.devops/unraid/`](.devops/unraid/).
 
@@ -429,15 +444,15 @@ and `ffprobe` (from FFmpeg).
 
 | Workflow | Purpose |
 |---|---|
-| [`.github/workflows/cpu-image.yml`](.github/workflows/cpu-image.yml) | Builds the CPU image, runs the three unit-test binaries inside it, pushes `:cpu` and `:cpu-<sha>` to GHCR |
-| [`.github/workflows/cuda-image.yml`](.github/workflows/cuda-image.yml) | Builds the CUDA image with a configurable `CUDA_DOCKER_ARCH`, pushes `:cuda` and `:cuda-<sha>` to GHCR |
+| [`.github/workflows/cpu-image.yml`](.github/workflows/cpu-image.yml) | Builds the CPU image, runs the three unit-test binaries inside it, pushes `:latest`, `:cpu`, and `:cpu-<sha>` to GHCR |
+| [`.github/workflows/cuda-image.yml`](.github/workflows/cuda-image.yml) | Builds two CUDA images. `:cuda` and its aliases (`:cu128`, `:turing`, `:ampere`, `:ada`, `:hopper`, `:blackwell`) are CUDA 12.8 for `sm_75` and up. `:cu124` and its aliases (`:maxwell`, `:pascal`, `:volta`) are CUDA 12.4 for `sm_50`/`60`/`61`/`70` |
 
 Both workflows are path-filtered to the Breeze server surface and can be run manually
-via `workflow_dispatch`. The CUDA architecture list defaults to `80;86;89;90` and is
-passed to CMake as `-DCMAKE_CUDA_ARCHITECTURES`; each entry is a bare SM number
-(`80`) or a suffixed form (`86-real`, `90-virtual`). Keeping this list explicit
-matters: without it the engine falls back to its portable default architecture list
-and compiles every `.cu` file once per architecture.
+via `workflow_dispatch`. Each image's architecture list is passed to CMake as
+`-DCMAKE_CUDA_ARCHITECTURES`; a bare SM number (`80`) or a suffixed form
+(`86-real`, `90-virtual`) is accepted. `120` is rewritten to `120a` (Blackwell).
+Keeping the list explicit matters: without it the engine falls back to its portable
+default architecture list and compiles every `.cu` file once per architecture.
 
 ---
 

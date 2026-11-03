@@ -244,8 +244,9 @@ if (ENGINE_ENABLE_CUDA AND NOT ENGINE_ENABLE_HIP)
         set(_AUDIOCPP_CUDA_ARCH_DEFAULTED TRUE)
         # XX-virtual = PTX (JIT, forward-compatible); XX-real = SASS (native).
         if (CUDAToolkit_VERSION VERSION_LESS "13")
-            # 50/61/70 (Maxwell/Pascal/Volta) unsupported by CUDA 13 toolkits
-            list(APPEND CMAKE_CUDA_ARCHITECTURES 50-virtual 61-virtual 70-virtual)
+            # 50/60/61/70 (Maxwell/Pascal/Volta) unsupported by CUDA 13 toolkits.
+            # 60 is P100; 61-virtual PTX does not JIT down to sm_60.
+            list(APPEND CMAKE_CUDA_ARCHITECTURES 50-virtual 60-virtual 61-virtual 70-virtual)
         endif()
         list(APPEND CMAKE_CUDA_ARCHITECTURES 75-real 80-virtual 86-real)
         if (CUDAToolkit_VERSION VERSION_GREATER_EQUAL "11.8")
